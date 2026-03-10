@@ -2,14 +2,14 @@ import streamlit as st
 import pandas as pd
 from utils.excel import to_excel_with_format
 from processor import preprocess_sales_data
-from analyzer import build_final_report
+from analyzer import build_final_report, save_to_master
 
 # 기본 설정
 st.set_page_config(page_title="손익분석", layout="wide")
 st.title("📊 손익분석")
 
 # 탭 설정
-tab1, tab2, tab3 = st.tabs(["매출", "UE", "summary"])
+tab1, tab2 = st.tabs(["UPLOAD", "VIEW"])
 
 with tab1:
     # 1️⃣ 기준 데이터 업로드
@@ -69,18 +69,30 @@ with tab1:
 
         # 3️⃣ 최종 매출 파일 생성
         st.header("3️⃣ 최종 결과 산출")
-        if st.button("▶ 최종 리포트 생성") and 'merged_df' in st.session_state:
-            final_df = build_final_report(base_df, st.session_state['merged_df'])
-            st.success("🎉 최종 매출 파일 생성 완료")
-            st.dataframe(final_df)
+        if st.button("▶ 최종 리포트 생성"):
+                final_df = build_final_report(base_df, merged_df)
+                st.session_state['current_final'] = final_df # 세션에 저장
+                st.dataframe(final_df)
 
-            st.download_button(
-                label="⬇ 최종 매출 다운로드",
-                data=to_excel_with_format(final_df, highlight_after_col="판매월"),
-                file_name="최종_매출_파일.xlsx"
-            )
+         # ✨ 마스터 저장 버튼 (결과가 있을 때만 노출)
+        if 'current_final' in st.session_state:
+            st.markdown("---")
+            st.subheader("💾 마스터 파일 관리")
+            if st.button("현재 결과를 마스터 파일에 누적 저장"):
+                fname = save_to_master(st.session_state['current_final'])
+                st.success(f"✅ '{fname}'에 누적 저장이 완료되었습니다!")
 
-
-# UE / Summary 탭 (준비중)
-with tab2: st.info("아직 준비중이다.")
-with tab3: st.info("아직 준비중이다.")
+with tab2:
+    st.header("🔍 데이터 확인")
+    import os
+    if os.path.exists("master_pnl.xlsx"):
+        master_df = pd.read_excel("master_pnl.xlsx")
+        
+        # 월별 필터 하나 달아주기
+        all_months = sorted(master_df['판매월'].unique())
+        selected = st.multiselect("조회할 판매월 선택", all_months, default=all_months)
+        
+        display_df = master_df[master_df['판매월'].isin(selected)]
+        st.dataframe(display_df)
+    else:
+        st.info("아직 마스터 파일이 없습니다. 데이터를 저장해 주세요.")

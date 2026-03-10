@@ -1,4 +1,5 @@
 import pandas as pd
+import os
 
 def build_final_report(base_df, merged_df):
     final_df = base_df.copy()
@@ -71,3 +72,20 @@ def build_final_report(base_df, merged_df):
 
 
     return final_df
+
+# 🔥 마스터 파일 누적 함수
+def save_to_master(new_df, file_name="master_pnl.xlsx"):
+    if os.path.exists(file_name):
+        # 1. 기존 파일이 있으면 읽어옴
+        old_df = pd.read_excel(file_name)
+        # 2. 새 데이터와 합침
+        combined_df = pd.concat([old_df, new_df], ignore_index=True)
+        # 3. 중복 제거 (상품ID가 같으면 최신 데이터만 남김)
+        combined_df = combined_df.drop_duplicates(subset=['상품ID'], keep='last')
+    else:
+        # 파일이 없으면 그냥 현재 데이터가 마스터가 됨
+        combined_df = new_df
+    
+    # 4. 엑셀로 저장
+    combined_df.to_excel(file_name, index=False)
+    return file_name

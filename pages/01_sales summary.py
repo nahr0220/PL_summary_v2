@@ -23,7 +23,7 @@ with tab1:
         # 최근 업데이트 시간 가져오기
         mtime = os.path.getmtime(master_file)
         last_updated = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')  # 시간 업데이트
-        st.markdown(f"<p style='text-align: right; color: gray; font-size: 0.85rem; margin-bottom: -20px;'>* 최근 업데이트: {last_updated}</p>", unsafe_allow_html=True)
+        st.markdown(f"<p style='text-align: right; color: gray; font-size: 0.85rem; margin-bottom: 0px;'>* 최근 업데이트: {last_updated}</p>", unsafe_allow_html=True)
         col_title, col_del = st.columns([8, 2])
         
         with col_del:

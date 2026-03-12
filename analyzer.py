@@ -8,21 +8,51 @@ def build_final_report(base_df, merged_df):
     def get_direct_sum(category_name):
         cond = (merged_df["분류"] == category_name) & (merged_df["판매월일치여부"] == "TRUE")
         return merged_df[cond].groupby("상품ID")["대변"].sum()
+    
+    def get_direct_sum2(category_name):
+        cond = merged_df["분류"] == category_name
+        return merged_df[cond].groupby("상품ID")["대변"].sum()
+
+
+    final_df['매출액'] = 0
 
     # 1. 상품매출
     final_df["상품매출"] = final_df["상품ID"].map(get_direct_sum("상품매출")).fillna(0)
-
     final_df['용역매출'] = 0
     final_df['위탁판매수수료'] = 0
+    #위탁_직
+    #위탁_간
     final_df['매도/낙찰'] = 0
     final_df['매도비'] = 0
     
-    # 2. 매도비_직
-    final_df["매도비_직"] = final_df["상품ID"].map(get_direct_sum("매도비")).fillna(0)
+    # # 2. 매도비_직
+    # final_df["매도비_직"] = final_df["상품ID"].map(get_direct_sum("매도비")).fillna(0)
+    # 매도비_직
+    direct_map = get_direct_sum("매도비")
+    final_df["매도비_직"] = final_df["상품ID"].map(direct_map).fillna(0)
 
-    #매도비_간
+    mask = final_df["매도비_직"] > 0
 
-    #final_df["매도비"] = final_df["매도비_직"] + final_df["매도비_간"]
+    # 매도비 전체 합계 (상품ID 매칭 없음)
+    total_fee = merged_df.loc[merged_df["분류"] == "매도비", "대변"].sum()
+
+    # 매도비_간 총액
+    indirect_total = total_fee - final_df["매도비_직"].sum()
+
+    n = mask.sum()
+
+    final_df["매도비_간"] = 0
+
+    if n > 0:
+        base = round(indirect_total / n)
+        final_df.loc[mask, "매도비_간"] = base
+
+        diff = indirect_total - final_df.loc[mask, "매도비_간"].sum()
+
+        idx = final_df.index[mask][0]
+        final_df.loc[idx, "매도비_간"] += diff
+
+    final_df["매도비"] = final_df["매도비_직"] + final_df["매도비_간"]
     
     final_df['낙찰수수료'] = 0
     
@@ -30,6 +60,19 @@ def build_final_report(base_df, merged_df):
     final_df["낙찰_직"] = final_df["상품ID"].map(get_direct_sum("낙찰수수료")).fillna(0)
 
     #낙찰_간
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     #final_df["낙찰수수료"] = final_df["낙찰_직"] + final_df["낙찰_간"]
     #final_df["매도/낙찰"] = final_df["매도비"] + final_df["낙찰수수료"]

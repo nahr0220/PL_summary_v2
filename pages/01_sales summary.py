@@ -20,16 +20,19 @@ with tab1:
     master_file = "master_pnl.xlsx"
     
     if os.path.exists(master_file) and os.path.getsize(master_file) > 0:
-        # 최근 업데이트 시간 가져오기
+        # 1. 파일 정보 및 레이아웃 설정
         mtime = os.path.getmtime(master_file)
-        last_updated = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')  # 시간 업데이트
-        st.markdown(f"<p style='text-align: right; color: gray; font-size: 0.85rem; margin-bottom: 0px;'>* 최근 업데이트: {last_updated}</p>", unsafe_allow_html=True)
-        col_title, col_del = st.columns([8, 2])
+        last_updated = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
         
-        with col_del:
-            # 삭제 버튼 (빨간색)
+        col_space, col_btn = st.columns([8, 2]) # 버튼을 오른쪽으로 밀기 위한 컬럼
+        
+        with col_btn:
+            # 삭제 버튼
             if st.button("🗑️ 전체 데이터 초기화", type="primary", use_container_width=True):
                 st.session_state['delete_confirm'] = True
+            
+            # 🔥 버튼 바로 아래에 업데이트 시간 표시
+            st.markdown(f"<p style='text-align: right; color: gray; font-size: 0.75rem; margin-top: -10px;'>* 최근 업데이트: {last_updated}</p>", unsafe_allow_html=True)
         
         # 3. 삭제 확인 절차 (실수 방지)
         if st.session_state.get('delete_confirm'):

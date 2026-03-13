@@ -1,125 +1,161 @@
 import pandas as pd
+import numpy as np
 import os
 
-def build_final_report(base_df, merged_df):
-    final_df = base_df.copy()
+def distribute_indirect_cost(df, merged_df, category_name, col_name, target_mask=None):
 
-    # 특정 분류의 합계를 가져오는 헬퍼 함수
-    def get_direct_sum(category_name):
-        cond = (merged_df["분류"] == category_name) & (merged_df["판매월일치여부"] == "TRUE")
-        return merged_df[cond].groupby("상품ID")["대변"].sum()
-    
-    def get_direct_sum2(category_name):
-        cond = merged_df["분류"] == category_name
-        return merged_df[cond].groupby("상품ID")["대변"].sum()
+    # 직접비 매칭
+    cond = (
+        (merged_df["계정명"] == category_name) &
+        (merged_df["판매월일치여부"] == "TRUE")
+    )
 
+    direct_map = merged_df[cond].groupby("상품ID")["대변"].sum()
+    df[f"{col_name}_직"] = df["상품ID"].map(direct_map).fillna(0)
 
-    final_df['매출액'] = 0
+    # 전체 비용
+    total_fee = merged_df.loc[
+        merged_df["계정명"] == category_name,
+        "대변"
+    ].sum()
 
-    # 1. 상품매출
-    final_df["상품매출"] = final_df["상품ID"].map(get_direct_sum("상품매출")).fillna(0)
-    final_df['용역매출'] = 0
-    final_df['위탁판매수수료'] = 0
-    #위탁_직
-    #위탁_간
-    final_df['매도/낙찰'] = 0
-    final_df['매도비'] = 0
-    
-    # # 2. 매도비_직
-    # final_df["매도비_직"] = final_df["상품ID"].map(get_direct_sum("매도비")).fillna(0)
-    # 매도비_직
-    direct_map = get_direct_sum("매도비")
-    final_df["매도비_직"] = final_df["상품ID"].map(direct_map).fillna(0)
+    # 간접비 총액
+    indirect_total = total_fee - df[f"{col_name}_직"].sum()
 
-    mask = final_df["매도비_직"] > 0
-
-    # 매도비 전체 합계 (상품ID 매칭 없음)
-    total_fee = merged_df.loc[merged_df["분류"] == "매도비", "대변"].sum()
-
-    # 매도비_간 총액
-    indirect_total = total_fee - final_df["매도비_직"].sum()
+    # mask 결정
+    if target_mask is None:
+        mask = df[f"{col_name}_직"] > 0
+    else:
+        mask = target_mask
 
     n = mask.sum()
 
-    final_df["매도비_간"] = 0
+    df[f"{col_name}_간"] = 0
 
-    if n > 0:
-        base = round(indirect_total / n)
-        final_df.loc[mask, "매도비_간"] = base
+    if n > 0 and indirect_total != 0:
 
-        diff = indirect_total - final_df.loc[mask, "매도비_간"].sum()
+        base_val = round(indirect_total / n)
 
-        idx = final_df.index[mask][0]
-        final_df.loc[idx, "매도비_간"] += diff
+        df.loc[mask, f"{col_name}_간"] = base_val
 
-    final_df["매도비"] = final_df["매도비_직"] + final_df["매도비_간"]
-    
-    final_df['낙찰수수료'] = 0
-    
-    # 3. 낙찰수수료
-    final_df["낙찰_직"] = final_df["상품ID"].map(get_direct_sum("낙찰수수료")).fillna(0)
+        diff = indirect_total - df.loc[mask, f"{col_name}_간"].sum()
 
-    #낙찰_간
+        df.loc[df.index[mask][0], f"{col_name}_간"] += diff
+
+    df[col_name] = df[f"{col_name}_직"] + df[f"{col_name}_간"]
+
+    return df
 
 
 
+def build_final_report(base_df, merged_df):
+
+    final_df = base_df.copy()
+
+    # ---------------- 상품/위탁 구분 ----------------
+    final_df["상품/위탁"] = np.where(
+        final_df["매입유형1"] == "위탁",
+        "위탁",
+        "상품"
+    )
+
+    final_df["소/도매"] = np.where(
+        final_df["판매지점"].str.contains("리본카옥션", na=False),
+        "도매",
+        "소매"
+    )
+
+    # ---------------- 상품매출 ----------------
+    cond_sales = (
+        (merged_df["계정명"] == "상품매출(자동차)") &
+        (merged_df["판매월일치여부"] == "TRUE")
+    )
+
+    final_df["상품매출"] = final_df["상품ID"].map(
+        merged_df[cond_sales].groupby("상품ID")["대변"].sum()
+    ).fillna(0)
+
+    # ---------------- 기본 배분 ----------------
+
+    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(매도비)", "매도비")
+    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(낙찰수수료)", "낙찰수수료")
+    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(리본케어)", "리본케어")
+    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(리본케어플러스)", "리본케어플러스")
+    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(성능보증)", "성능보증")
+    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(탁송비)", "탁송비")
 
 
+    # ---------------- 위탁판매수수료 ----------------
+    consign_mask = final_df["매입유형1"].isin(["위탁", "위탁매입"])
+
+    final_df = distribute_indirect_cost(
+        final_df,
+        merged_df,
+        "수입수수료(위탁판매수수료)",
+        "위탁수수료2",
+        target_mask=consign_mask
+    )
 
 
+    # ---------------- 금융수수료 ----------------
+    finance_mask = final_df["상품/위탁"] == "상품"
+
+    final_df = distribute_indirect_cost(
+        final_df,
+        merged_df,
+        "수입수수료(금융수수료)",
+        "금융수수료",
+        target_mask=finance_mask
+    )
 
 
+    # ---------------- 평가수수료 ----------------
+    eval_mask = (
+        (final_df["배정채널"] == "K") |
+        (final_df["판매처"].str.contains("글로비스", na=False))
+    )
+
+    final_df = distribute_indirect_cost(
+        final_df,
+        merged_df,
+        "수입수수료(평가사수수료)",
+        "평가사수수료",
+        target_mask=eval_mask
+    )
 
 
+    # ---------------- 원상회복 ----------------
+    restore_mask = (
+        (final_df["매입유형1"] == "선물") &
+        (final_df["매입처"]=='현대캐피탈')
+    )
+
+    final_df = distribute_indirect_cost(
+        final_df,
+        merged_df,
+        "수입수수료(원상회복비)",
+        "원상회복비",
+        target_mask=restore_mask
+    )
 
 
+    # ---------------- 연회비 ----------------
+    annual_mask = final_df["소/도매"] == "도매"
 
-    #final_df["낙찰수수료"] = final_df["낙찰_직"] + final_df["낙찰_간"]
-    #final_df["매도/낙찰"] = final_df["매도비"] + final_df["낙찰수수료"]
-
-    #4. 금융수수료
-
-    #5. 기타(원상회복비+연회비)
-    final_df['기타'] = 0
-    final_df['원상회복'] = 0
-
-    # 원상회복_직
-    final_df["원복_직"] = final_df["상품ID"].map(get_direct_sum("원상회복비")).fillna(0)
-    # 원상회복_간
-    # 연회비_간
-    # 평가사수수료
-    # 평가사수수료_직
-    # 평가사수수료_간
-
-    # 리본케어
-    final_df['리본케어'] = 0
-    final_df["리본케어_직"] = final_df["상품ID"].map(get_direct_sum("리본케어")).fillna(0)
-    # 리본케어_간
-
-    # final_df['리본케어'] = final_df["리본케어_직"] + final_df["리본케어_간"]
-
-    # 리본케어플러스
-    final_df['리본케어플러스'] = 0
-    final_df["리본케어플러스_직"] = final_df["상품ID"].map(get_direct_sum("리본케어플러스")).fillna(0)
-    # 리본케어플러스_간
-    # final_df['리본케어플러스'] = final_df["리본케어플러스_직"] + final_df["리본케어플러스_간"]
-
-    # 성능보증
-
-    # 탁송비
-    final_df['탁송비'] = 0
-    final_df["탁송비_직"] = final_df["상품ID"].map(get_direct_sum("탁송비")).fillna(0)
-    #탁송비_간
-    # final_df['탁송비'] = final_df["탁송비_직"] + final_df["탁송비_간"]
-
-
+    final_df = distribute_indirect_cost(
+        final_df,
+        merged_df,
+        "수입수수료(연회비)",
+        "연회비",
+        target_mask=annual_mask
+    )
 
     return final_df
 
 # 🔥 마스터 파일 누적 함수
 def save_to_master(new_df, file_name="master_pnl.xlsx"):
     if os.path.exists(file_name):
-        # 1. 기존 파일이 있으면 읽어옴
+        # 1. 기존 파일이 있으면 읽기
         old_df = pd.read_excel(file_name)
         # 2. 새 데이터와 합침
         combined_df = pd.concat([old_df, new_df], ignore_index=True)

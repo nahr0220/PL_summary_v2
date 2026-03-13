@@ -77,14 +77,14 @@ def build_final_report(base_df, merged_df):
 
     # ---------------- 기본 배분 ----------------
 
-    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(매도비)", "매도비")
-    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(낙찰수수료)", "낙찰수수료")
+    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(매도비)", "매도비2")
+    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(낙찰수수료)", "낙찰수수료2")
     final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(리본케어)", "리본케어")
     final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(리본케어플러스)", "리본케어플러스")
     final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(성능보증)", "성능보증")
     final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(탁송비)", "탁송비")
 
-
+    final_df['매도/낙찰'] = final_df['매도비2'] + final_df['낙찰수수료2']
     # ---------------- 위탁판매수수료 ----------------
     consign_mask = final_df["매입유형1"].isin(["위탁", "위탁매입"])
 
@@ -92,7 +92,7 @@ def build_final_report(base_df, merged_df):
         final_df,
         merged_df,
         "수입수수료(위탁판매수수료)",
-        "위탁수수료2",
+        "위탁판매수수료2",
         target_mask=consign_mask
     )
 
@@ -149,6 +149,11 @@ def build_final_report(base_df, merged_df):
         "연회비",
         target_mask=annual_mask
     )
+
+    final_df['기타'] = final_df['원상회복비'] + final_df['연회비'] + final_df['평가사수수료'] + final_df['리본케어'] + final_df['리본케어플러스']  + final_df['성능보증'] + final_df['탁송비']
+    final_df['용역매출'] = final_df['매도/낙찰'] + final_df['위탁판매수수료2'] + final_df['금융수수료'] + final_df['기타']
+    final_df['매출액'] = final_df['상품매출'] + final_df['용역매출']
+
 
     return final_df
 

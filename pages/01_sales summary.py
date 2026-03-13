@@ -8,17 +8,15 @@ import os
 
 # 기본 설정
 st.set_page_config(page_title="손익분석", layout="wide")
-st.title("1. sales summary")
+st.title("Sales Summary")
 
 # 탭 설정
 tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])
 
 
 with tab1:        # VIEW
-    st.header("🔍 sales summary")
-
     master_file = "master_pnl.xlsx"
-    
+
     if os.path.exists(master_file) and os.path.getsize(master_file) > 0:
         # 1. 파일 정보 및 레이아웃 설정
         mtime = os.path.getmtime(master_file)
@@ -51,6 +49,86 @@ with tab1:        # VIEW
 
         # 4. 데이터 로드 및 요약 지표
         master_df = pd.read_excel(master_file)
+        order = ['소매', '도매']
+        master_df['소/도매'] = pd.Categorical(master_df['소/도매'], categories=order, ordered=True)
+        # ------------------------------------------------------------------
+        # [수정] 시인성 강화 스타일 정의 함수
+        # ------------------------------------------------------------------
+        def style_dataframe(df):
+            # 0은 '-'로, 나머지는 천 단위 콤마로 표시하는 포맷 함수
+            # 문자열로 변환되므로 우측 정렬 속성이 중요합니다.
+            format_func = lambda x: '-' if x == 0 else f"{x:,.0f}"
+            
+            return df.style.format(format_func) \
+                .set_properties(**{
+                    'text-align': 'right', 
+                    'font-family': 'Malgun Gothic',
+                    'font-size': '13px'
+                }) \
+                .apply(lambda x: [
+                    'background-color: #e6f3ff; font-weight: bold; border-top: 2px solid #004c99' 
+                    if (x.name[0] == '전체' or x.name == '합계(전체)') 
+                    else '' for _ in x
+                ], axis=1) \
+                .set_table_styles([
+                    {'selector': 'th', 'props': [('background-color', '#f8f9fa'), ('text-align', 'center')]}
+                ])
+
+        # ------------------------------------------------------------------
+        # [1] 월별 판매 대수 출력
+        # ------------------------------------------------------------------
+        if not master_df.empty:
+            st.markdown("##### 월별 판매 대수")
+            
+            summary_pivot = master_df.pivot_table(
+                index=['상품/위탁', '소/도매'],
+                columns='판매월',
+                values='상품ID',
+                aggfunc='count',
+                fill_value=0
+            ).astype(int) # 먼저 정수형으로 확정
+
+            summary_pivot = summary_pivot.reindex(columns=range(1, 13), fill_value=0)
+            summary_pivot['연간 총합'] = summary_pivot.sum(axis=1)
+            
+            # 합계 행 추가
+            total_row = summary_pivot.sum(axis=0)
+            summary_pivot.loc[('전체', '월별 총합'), :] = total_row
+
+            # 스타일 적용 후 출력
+            st.write(style_dataframe(summary_pivot))
+        # ------------------------------------------------------------------
+        # [2] 월별 매출 출력
+        # ------------------------------------------------------------------
+        if not master_df.empty:
+            st.markdown("##### 월별 매출")
+            
+            melted_revenue = master_df.melt(
+                id_vars=['소/도매', '판매월'],
+                value_vars=['상품매출', '용역매출'],
+                var_name='매출항목',
+                value_name='금액'
+            )
+            
+            rev_pivot = melted_revenue.pivot_table(
+                index=['매출항목', '소/도매'], 
+                columns='판매월',
+                values='금액',
+                aggfunc='sum',
+                fill_value=0
+            ).astype(int)
+
+            rev_pivot = rev_pivot.reindex(columns=range(1, 13), fill_value=0)
+            rev_pivot['연간 총합'] = rev_pivot.sum(axis=1)
+
+            # 합계 행 추가
+            rev_total_row = rev_pivot.sum(axis=0)
+            rev_pivot.loc[('전체', '합계'), :] = rev_total_row
+
+            # 스타일 적용 후 출력
+            st.write(style_dataframe(rev_pivot))
+            st.divider()
+        
         
         # 판매월 멀티셀렉트 필터
         all_months = sorted(master_df['판매월'].unique())
@@ -58,7 +136,6 @@ with tab1:        # VIEW
         
         # 필터링된 데이터
         display_df = master_df[master_df['판매월'].isin(selected_months)]
-        
         # # 주요 지표 시각화 (Metric)
         # if not display_df.empty:
         #     m1, m2, m3, m4 = st.columns(4)

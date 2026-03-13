@@ -49,7 +49,6 @@ def preprocess_sales_data(uploaded_files, base_df):
 
     # 2️⃣ 차량번호 추출
     unit_pattern = r'(?:(?:서울|부산|대구|인천|광주|대전|울산|경기)?\d{2,3}[가-힣]\d{4}|지게차)'
-    merged_df["적요"] = merged_df["적요"].fillna("").str.replace(" ", "", regex=False)
     merged_df["차량번호"] = merged_df["적요"].str.extract(f"({unit_pattern})")
 
     # 3️⃣ 상품ID Lookup

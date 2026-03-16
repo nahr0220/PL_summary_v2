@@ -51,9 +51,7 @@ with tab1:        # VIEW
         master_df = pd.read_excel(master_file)
         order = ['소매', '도매']
         master_df['소/도매'] = pd.Categorical(master_df['소/도매'], categories=order, ordered=True)
-        # ------------------------------------------------------------------
-        # [수정] 시인성 강화 스타일 정의 함수
-        # ------------------------------------------------------------------
+
         def style_dataframe(df):
             # 0은 '-'로, 나머지는 천 단위 콤마로 표시하는 포맷 함수
             # 문자열로 변환되므로 우측 정렬 속성이 중요합니다.
@@ -74,9 +72,7 @@ with tab1:        # VIEW
                     {'selector': 'th', 'props': [('background-color', '#f8f9fa'), ('text-align', 'center')]}
                 ])
 
-        # ------------------------------------------------------------------
-        # [1] 월별 판매 대수 출력
-        # ------------------------------------------------------------------
+        # 월별 판매 대수 출력
         if not master_df.empty:
             st.markdown("##### 월별 판매 대수")
             
@@ -97,9 +93,8 @@ with tab1:        # VIEW
 
             # 스타일 적용 후 출력
             st.write(style_dataframe(summary_pivot))
-        # ------------------------------------------------------------------
-        # [2] 월별 매출 출력
-        # ------------------------------------------------------------------
+
+        # 월별 매출 출력
         if not master_df.empty:
             st.markdown("##### 월별 매출")
             
@@ -129,18 +124,24 @@ with tab1:        # VIEW
             st.write(style_dataframe(rev_pivot))
             st.divider()
         
-        
-        # 판매월 멀티셀렉트 필터
-        all_months = sorted(master_df['판매월'].unique())
-        selected_months = st.multiselect("조회할 판매월 선택", all_months, default=all_months)
-        
-        # 필터링된 데이터
-        display_df = master_df[master_df['판매월'].isin(selected_months)]
-        # # 주요 지표 시각화 (Metric)
-        st.markdown(f"**건수:** {len(display_df):,}건 │ **매출합계** {display_df['매출합계'].sum():,.0f}원 │ **판매월:** {display_df['판매월'].min()}월 ~ {display_df['판매월'].max()}월")
+        # 멀티셀렉트 필터
+        col1, col2 = st.columns(2)
 
-        
-        # 데이터프레임 출력
+        with col1:
+            all_years = sorted(master_df['판매연도'].dropna().unique())
+            selected_years = st.multiselect("판매연도", all_years, default=all_years)
+
+        with col2:
+            all_months = sorted(master_df['판매월'].dropna().unique())
+            selected_months = st.multiselect("판매월", all_months, default=all_months)
+
+        # 데이터 필터링
+        display_df = master_df[(master_df['판매연도'].isin(selected_years)) & (master_df['판매월'].isin(selected_months))]
+
+        # 주요 지표
+        counts = display_df['매입유형1'].value_counts()
+        st.markdown(f"**건수:** {len(display_df):,}건 │ **상품:** {len(display_df) - counts.get('위탁', 0):,}건 │ **위탁:** {counts.get('위탁', 0):,}건 │ **매출합계:** {display_df['매출합계'].sum():,.0f}원 │ **판매월:** {display_df['판매월'].min()}월 ~ {display_df['판매월'].max()}월")
+
         st.dataframe(display_df, use_container_width=True)
         
         # 필터링된 데이터 다운로드
@@ -185,18 +186,52 @@ with tab2: # UPLOAD
         merged_df = preprocess_sales_data(uploaded_files, base_df)
         st.session_state['merged_df'] = merged_df 
 
-        # 계정 필터 (12개 대응: multiselect 유지하되 가독성 확보)
+        # -----------------------------
+        # 판매연도 / 판매월 필터
+        # -----------------------------
+        year_col = '판매연도'
+        month_col = '판매월'
+
+        all_years = sorted(merged_df["판매연도"].dropna().unique())
+        all_months = sorted(merged_df["판매월"].dropna().unique())
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            selected_years = st.multiselect(
+                "판매연도",
+                options=all_years,
+                default=all_years
+            )
+
+        with col2:
+            selected_months = st.multiselect(
+                "판매월",
+                options=all_months,
+                default=all_months
+            )
+
+        # -----------------------------
+        # 계정 필터
+        # -----------------------------
         acc_col = '계정명' if '계정명' in merged_df.columns else '계정'
-        all_accounts = sorted(merged_df[acc_col].unique())
-        
+        all_accounts = sorted(merged_df[acc_col].dropna().unique())
+
         selected_accounts = st.multiselect(
-            "계정 선택 (미선택 시 전체 조회)", 
+            "계정 선택 (미선택 시 전체 조회)",
             options=all_accounts,
             default=all_accounts
         )
 
-        # 필터링 적용
-        filtered_df = merged_df[merged_df[acc_col].isin(selected_accounts)] if selected_accounts else merged_df
+        # -----------------------------
+        # 필터 적용
+        # -----------------------------
+        filtered_df = merged_df[
+            (merged_df[year_col].isin(selected_years)) &
+            (merged_df[month_col].isin(selected_months)) &
+            (merged_df[acc_col].isin(selected_accounts))
+        ]
+
 
         st.markdown(f"**필터 결과:** {len(filtered_df):,}건 │ **대변합:** {filtered_df['대변'].sum():,.0f}원 │ **회계월:** {filtered_df['회계월'].min()}월 ~ {filtered_df['회계월'].max()}월")
         st.dataframe(filtered_df, use_container_width=True)

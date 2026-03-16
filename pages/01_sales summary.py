@@ -137,7 +137,7 @@ with tab1:        # VIEW
         # 필터링된 데이터
         display_df = master_df[master_df['판매월'].isin(selected_months)]
         # # 주요 지표 시각화 (Metric)
-        st.markdown(f"**건수:** {len(display_df):,}건 │ **매출액합계** {display_df['매출액'].sum():,.0f}원 │ **판매월:** {display_df['판매월'].min()}월 ~ {display_df['판매월'].max()}월")
+        st.markdown(f"**건수:** {len(display_df):,}건 │ **매출액합계** {display_df['매출합계'].sum():,.0f}원 │ **판매월:** {display_df['판매월'].min()}월 ~ {display_df['판매월'].max()}월")
 
         
         # 데이터프레임 출력

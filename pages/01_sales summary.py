@@ -137,12 +137,8 @@ with tab1:        # VIEW
         # 필터링된 데이터
         display_df = master_df[master_df['판매월'].isin(selected_months)]
         # # 주요 지표 시각화 (Metric)
-        # if not display_df.empty:
-        #     m1, m2, m3, m4 = st.columns(4)
-        #     m1.metric("총 매출액", f"{display_df['상품매출'].sum():,.0f}원")
-        #     m2.metric("판매 대수", f"{len(display_df):,}대")
-        #     m3.metric("평균 단가", f"{(display_df['상품매출'].sum() / len(display_df)):,.0f}원")
-        #     m4.metric("위탁 비중", f"{(len(display_df[display_df['매입유형1']=='위탁']) / len(display_df) * 100):.1f}%")
+        st.markdown(f"**건수:** {len(display_df):,}건 │ **매출액합계** {display_df['매출액'].sum():,.0f}원 │ **판매월:** {display_df['판매월'].min()}월 ~ {display_df['판매월'].max()}월")
+
         
         # 데이터프레임 출력
         st.dataframe(display_df, use_container_width=True)

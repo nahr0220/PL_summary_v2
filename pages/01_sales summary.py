@@ -54,25 +54,27 @@ with tab1:        # VIEW
 
         with st.expander("더존 PL"):
             indirect_items = ['원상회복', '연회비', '매도', '낙찰', '위탁', '평가사수수료', '금융수수료', '리본케어','리본케어플러스', '성능보증', '탁송비']
-            all_months = [f"{i}월" for i in range(1, 13)]
+            
+            # 컬럼 이름을 '1월' 대신 숫자 1, 2... 형태로 관리
+            all_months_numeric = list(range(1, 13)) 
             monthly_data = []
 
-            # 1. [전체 합계] - 모든 매출의 총합 (가장 먼저 추가)
+            # 1. [전체 합계]
             if '매출합계' in master_df.columns:
                 total_sum = master_df.groupby('판매월')['매출합계'].sum()
-                for m in range(1, 13):
+                for m in all_months_numeric:
                     monthly_data.append({
                         "항목": "00. 총합계", "구분": " ", 
-                        "판매월": f"{m}월", "금액": total_sum.get(m, 0)
+                        "판매월": m, "금액": total_sum.get(m, 0)
                     })
 
-            # 2. [상품매출] - 단독 항목
+            # 2. [상품매출]
             if '상품매출' in master_df.columns:
                 s_df = master_df.groupby('판매월')['상품매출'].sum()
-                for m in range(1, 13):
+                for m in all_months_numeric:
                     monthly_data.append({
                         "항목": "01. 상품매출", "구분": " ", 
-                        "판매월": f"{m}월", "금액": s_df.get(m, 0)
+                        "판매월": m, "금액": s_df.get(m, 0)
                     })
 
             # 3. [용역/수수료 항목들]
@@ -80,26 +82,26 @@ with tab1:        # VIEW
                 if item in master_df.columns:
                     display_name = f"{i:02d}. {item}"
                     
+                    # 월별로 그룹화해서 합계 계산
                     agg_df = master_df.groupby('판매월').agg({
                         item: "sum",
                         f"{item}_직": "sum" if f"{item}_직" in master_df.columns else lambda x: 0,
                         f"{item}_간": "sum" if f"{item}_간" in master_df.columns else lambda x: 0
                     })
                     
-                    for m in range(1, 13):
-                        m_str = m
+                    for m in all_months_numeric:
                         val_total = agg_df.loc[m, item] if m in agg_df.index else 0
                         val_dir = agg_df.loc[m, f"{item}_직"] if m in agg_df.index else 0
                         val_ind = agg_df.loc[m, f"{item}_간"] if m in agg_df.index else 0
                         
-                        monthly_data.append({"항목": display_name, "구분": " ", "판매월": m_str, "금액": val_total})
-                        monthly_data.append({"항목": display_name, "구분": "1. 직접", "판매월": m_str, "금액": val_dir})
-                        monthly_data.append({"항목": display_name, "구분": "2. 간접", "판매월": m_str, "금액": val_ind})
+                        monthly_data.append({"항목": display_name, "구분": " ", "판매월": m, "금액": val_total})
+                        monthly_data.append({"항목": display_name, "구분": "1. 직접", "판매월": m, "금액": val_dir})
+                        monthly_data.append({"항목": display_name, "구분": "2. 간접", "판매월": m, "금액": val_ind})
 
             if monthly_data:
                 final_df = pd.DataFrame(monthly_data)
                 
-                # 피벗 생성
+                # 피벗 생성 (1~12 숫자가 컬럼이 됨)
                 pivot_df = final_df.pivot_table(
                     index=["항목", "구분"], 
                     columns="판매월", 
@@ -109,25 +111,24 @@ with tab1:        # VIEW
                     observed=False
                 )
                 
-                # 1~12월 순서 고정
-                pivot_df = pivot_df[all_months]
+                # 1~12월 순서 보장 및 'Mixed Type' 경고 방지를 위해 컬럼명을 문자로 변환
+                pivot_df = pivot_df.reindex(columns=all_months_numeric, fill_value=0)
+                pivot_df.columns = pivot_df.columns.astype(str) # '1', '2' ... 형태로 변환
                 
                 def make_bold(s):
-                    is_total = '합계' in s.name[1] or '계' in s.name[1]
+                    is_total = s.name[1] == " "
                     return ['background-color: #f8f9fb; font-weight: bold' if is_total else '' for _ in s]
 
-                # 2. 0을 '-'로 바꾸는 포맷 함수 (추가됨)
                 def format_zero_to_dash(v):
                     return "-" if v == 0 else f"{v:,.0f}"
 
-                # 3. 최종 출력
+                # 최종 출력
                 st.dataframe(
                     pivot_df.style
                     .apply(make_bold, axis=1)
                     .format(format_zero_to_dash),
                     width="stretch"
                 )
-
             else:
                 st.warning("데이터가 없습니다.")
         

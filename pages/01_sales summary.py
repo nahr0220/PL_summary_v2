@@ -52,6 +52,82 @@ with tab1:        # VIEW
         order = ['소매', '도매']
         master_df['소/도매'] = pd.Categorical(master_df['소/도매'], categories=order, ordered=True)
 
+        with st.expander("📊 월별 매출 및 배부 상세 현황 (전체 합계 및 상품매출 분리)"):
+            indirect_items = [
+                '원상회복', '연회비', '매도', '낙찰', '위탁', '평가사수수료', '금융수수료', '리본케어',
+                '리본케어플러스', '성능보증', '탁송비'
+            ]
+            
+            all_months = [f"{i}월" for i in range(1, 13)]
+            monthly_data = []
+
+            # 1. [전체 합계] - 모든 매출의 총합 (가장 먼저 추가)
+            if '매출합계' in master_df.columns:
+                total_sum = master_df.groupby('판매월')['매출합계'].sum()
+                for m in range(1, 13):
+                    monthly_data.append({
+                        "항목": "00. 총합계", "구분": " ", 
+                        "판매월": f"{m}월", "금액": total_sum.get(m, 0)
+                    })
+
+            # 2. [상품매출] - 단독 항목
+            if '상품매출' in master_df.columns:
+                s_df = master_df.groupby('판매월')['상품매출'].sum()
+                for m in range(1, 13):
+                    monthly_data.append({
+                        "항목": "01. 상품매출", "구분": " ", 
+                        "판매월": f"{m}월", "금액": s_df.get(m, 0)
+                    })
+
+            # 3. [용역/수수료 항목들]
+            for i, item in enumerate(indirect_items, start=2):
+                if item in master_df.columns:
+                    display_name = f"{i:02d}. {item}"
+                    
+                    agg_df = master_df.groupby('판매월').agg({
+                        item: "sum",
+                        f"{item}_직": "sum" if f"{item}_직" in master_df.columns else lambda x: 0,
+                        f"{item}_간": "sum" if f"{item}_간" in master_df.columns else lambda x: 0
+                    })
+                    
+                    for m in range(1, 13):
+                        m_str = f"{m}월"
+                        val_total = agg_df.loc[m, item] if m in agg_df.index else 0
+                        val_dir = agg_df.loc[m, f"{item}_직"] if m in agg_df.index else 0
+                        val_ind = agg_df.loc[m, f"{item}_간"] if m in agg_df.index else 0
+                        
+                        monthly_data.append({"항목": display_name, "구분": " ", "판매월": m_str, "금액": val_total})
+                        monthly_data.append({"항목": display_name, "구분": "1. 직접", "판매월": m_str, "금액": val_dir})
+                        monthly_data.append({"항목": display_name, "구분": "2. 간접", "판매월": m_str, "금액": val_ind})
+
+            if monthly_data:
+                final_df = pd.DataFrame(monthly_data)
+                
+                # 피벗 생성
+                pivot_df = final_df.pivot_table(
+                    index=["항목", "구분"], 
+                    columns="판매월", 
+                    values="금액",
+                    aggfunc="sum",
+                    fill_value=0
+                )
+                
+                # 1~12월 순서 고정
+                pivot_df = pivot_df[all_months]
+
+                # 스타일: 합계/계 행 강조
+                def make_bold(s):
+                    is_total = '합계' in s.name[1] or '계' in s.name[1]
+                    return ['background-color: #f8f9fb; font-weight: bold' if is_total else '' for _ in s]
+
+                st.dataframe(
+                    pivot_df.style.apply(make_bold, axis=1).format("{:,.0f}"),
+                    use_container_width=True
+                )
+            else:
+                st.warning("데이터가 없습니다.")
+        
+
         def style_dataframe(df):
             # 0은 '-'로, 나머지는 천 단위 콤마로 표시하는 포맷 함수
             # 문자열로 변환되므로 우측 정렬 속성이 중요합니다.
@@ -156,6 +232,8 @@ with tab1:        # VIEW
 
 
 with tab2: # UPLOAD
+
+
     # 1️⃣ 기준 데이터 업로드
     st.header("1️⃣ sales data")
     base_file = st.file_uploader("기준 엑셀 업로드", type=["xlsx"], key="base")
@@ -211,28 +289,14 @@ with tab2: # UPLOAD
                 default=all_months
             )
 
-        # -----------------------------
         # 계정 필터
-        # -----------------------------
         acc_col = '계정명' if '계정명' in merged_df.columns else '계정'
         all_accounts = sorted(merged_df[acc_col].dropna().unique())
 
-        selected_accounts = st.multiselect(
-            "계정 선택 (미선택 시 전체 조회)",
-            options=all_accounts,
-            default=all_accounts
-        )
+        selected_accounts = st.multiselect("계정 선택", options=all_accounts, default=all_accounts)
 
-        # -----------------------------
         # 필터 적용
-        # -----------------------------
-        filtered_df = merged_df[
-            (merged_df[year_col].isin(selected_years)) &
-            (merged_df[month_col].isin(selected_months)) &
-            (merged_df[acc_col].isin(selected_accounts))
-        ]
-
-
+        filtered_df = merged_df[(merged_df[year_col].isin(selected_years)) & (merged_df[month_col].isin(selected_months)) & (merged_df[acc_col].isin(selected_accounts))]
         st.markdown(f"**필터 결과:** {len(filtered_df):,}건 │ **대변합:** {filtered_df['대변'].sum():,.0f}원 │ **회계월:** {filtered_df['회계월'].min()}월 ~ {filtered_df['회계월'].max()}월")
         st.dataframe(filtered_df, use_container_width=True)
 

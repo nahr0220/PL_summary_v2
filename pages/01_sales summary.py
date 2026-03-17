@@ -26,7 +26,7 @@ with tab1:        # VIEW
         
         with col_btn:
             # 삭제 버튼
-            if st.button("🗑️ 전체 데이터 초기화", type="primary", use_container_width=True):
+            if st.button("🗑️ 전체 데이터 초기화", type="primary", width="stretch"):
                 st.session_state['delete_confirm'] = True
             
             # 🔥 버튼 바로 아래에 업데이트 시간 표시
@@ -36,13 +36,13 @@ with tab1:        # VIEW
         if st.session_state.get('delete_confirm'):
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("✅ 삭제", use_container_width=True):
+                if st.button("✅ 삭제", width="stretch"):
                     os.remove(master_file)
                     st.session_state['delete_confirm'] = False
                     st.success("데이터가 완전히 삭제되었습니다.")
                     st.rerun()
             with c2:
-                if st.button("❌ 취소", use_container_width=True):
+                if st.button("❌ 취소", width="stretch"):
                     st.session_state['delete_confirm'] = False
                     st.rerun()
 
@@ -52,12 +52,8 @@ with tab1:        # VIEW
         order = ['소매', '도매']
         master_df['소/도매'] = pd.Categorical(master_df['소/도매'], categories=order, ordered=True)
 
-        with st.expander("📊 월별 매출 및 배부 상세 현황 (전체 합계 및 상품매출 분리)"):
-            indirect_items = [
-                '원상회복', '연회비', '매도', '낙찰', '위탁', '평가사수수료', '금융수수료', '리본케어',
-                '리본케어플러스', '성능보증', '탁송비'
-            ]
-            
+        with st.expander("더존 PL"):
+            indirect_items = ['원상회복', '연회비', '매도', '낙찰', '위탁', '평가사수수료', '금융수수료', '리본케어','리본케어플러스', '성능보증', '탁송비']
             all_months = [f"{i}월" for i in range(1, 13)]
             monthly_data = []
 
@@ -114,16 +110,23 @@ with tab1:        # VIEW
                 
                 # 1~12월 순서 고정
                 pivot_df = pivot_df[all_months]
-
-                # 스타일: 합계/계 행 강조
+                
                 def make_bold(s):
                     is_total = '합계' in s.name[1] or '계' in s.name[1]
                     return ['background-color: #f8f9fb; font-weight: bold' if is_total else '' for _ in s]
 
+                # 2. 0을 '-'로 바꾸는 포맷 함수 (추가됨)
+                def format_zero_to_dash(v):
+                    return "-" if v == 0 else f"{v:,.0f}"
+
+                # 3. 최종 출력
                 st.dataframe(
-                    pivot_df.style.apply(make_bold, axis=1).format("{:,.0f}"),
-                    use_container_width=True
+                    pivot_df.style
+                    .apply(make_bold, axis=1)
+                    .format(format_zero_to_dash),
+                    width="stretch"
                 )
+
             else:
                 st.warning("데이터가 없습니다.")
         
@@ -218,7 +221,7 @@ with tab1:        # VIEW
         counts = display_df['매입유형1'].value_counts()
         st.markdown(f"**건수:** {len(display_df):,}건 │ **상품:** {len(display_df) - counts.get('위탁', 0):,}건 │ **위탁:** {counts.get('위탁', 0):,}건 │ **매출합계:** {display_df['매출합계'].sum():,.0f}원 │ **판매월:** {display_df['판매월'].min()}월 ~ {display_df['판매월'].max()}월")
 
-        st.dataframe(display_df, use_container_width=True)
+        st.dataframe(display_df, width="stretch")
         
         # 필터링된 데이터 다운로드
         st.download_button(
@@ -232,8 +235,7 @@ with tab1:        # VIEW
 
 
 with tab2: # UPLOAD
-
-
+    
     # 1️⃣ 기준 데이터 업로드
     st.header("1️⃣ sales data")
     base_file = st.file_uploader("기준 엑셀 업로드", type=["xlsx"], key="base")
@@ -253,7 +255,7 @@ with tab2: # UPLOAD
         consign_cnt = (base_df['매입유형1'] == '위탁').sum()
         product_cnt = total_cnt - consign_cnt
         st.markdown(f"**전체:** {total_cnt:,}건 │ **상품:** {product_cnt:,}건 │ **위탁:** {consign_cnt:,}건 │ **판매월:** {base_df['판매월'].min()}월 ~ {base_df['판매월'].max()}월")
-        st.dataframe(base_df, use_container_width=True)
+        st.dataframe(base_df, width="stretch")
 
     # 2️⃣ 자동 전처리 영역
     st.divider()
@@ -264,9 +266,6 @@ with tab2: # UPLOAD
         merged_df = preprocess_sales_data(uploaded_files, base_df)
         st.session_state['merged_df'] = merged_df 
 
-        # -----------------------------
-        # 판매연도 / 판매월 필터
-        # -----------------------------
         year_col = '판매연도'
         month_col = '판매월'
 
@@ -298,7 +297,7 @@ with tab2: # UPLOAD
         # 필터 적용
         filtered_df = merged_df[(merged_df[year_col].isin(selected_years)) & (merged_df[month_col].isin(selected_months)) & (merged_df[acc_col].isin(selected_accounts))]
         st.markdown(f"**필터 결과:** {len(filtered_df):,}건 │ **대변합:** {filtered_df['대변'].sum():,.0f}원 │ **회계월:** {filtered_df['회계월'].min()}월 ~ {filtered_df['회계월'].max()}월")
-        st.dataframe(filtered_df, use_container_width=True)
+        st.dataframe(filtered_df, width="stretch")
 
         st.download_button(
             label="⬇ 엑셀 다운로드",
@@ -317,13 +316,13 @@ with tab2: # UPLOAD
         # 결과가 세션에 있을 때만 화면에 표시
         if 'current_final' in st.session_state:
             f_df = st.session_state['current_final']
-            st.dataframe(f_df, use_container_width=True)
+            st.dataframe(f_df, width="stretch")
 
             st.download_button(
                 label="⬇️ 엑셀 다운로드",
                 data=to_excel_with_format(f_df, highlight_after_col="판매월"),
                 file_name=f"final_summary.xlsx",
-                use_container_width=True
+                width="stretch"
             )
 
             # 마스터 저장 영역

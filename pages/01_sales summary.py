@@ -105,7 +105,8 @@ with tab1:        # VIEW
                     columns="판매월", 
                     values="금액",
                     aggfunc="sum",
-                    fill_value=0
+                    fill_value=0,
+                    observed=False
                 )
                 
                 # 1~12월 순서 고정
@@ -160,7 +161,8 @@ with tab1:        # VIEW
                 columns='판매월',
                 values='상품ID',
                 aggfunc='count',
-                fill_value=0
+                fill_value=0,
+                observed=False
             ).astype(int) # 먼저 정수형으로 확정
 
             summary_pivot = summary_pivot.reindex(columns=range(1, 13), fill_value=0)
@@ -189,7 +191,8 @@ with tab1:        # VIEW
                 columns='판매월',
                 values='금액',
                 aggfunc='sum',
-                fill_value=0
+                fill_value=0,
+                observed=False
             ).astype(int)
 
             rev_pivot = rev_pivot.reindex(columns=range(1, 13), fill_value=0)

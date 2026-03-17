@@ -87,7 +87,7 @@ with tab1:        # VIEW
                     })
                     
                     for m in range(1, 13):
-                        m_str = f"{m}월"
+                        m_str = m
                         val_total = agg_df.loc[m, item] if m in agg_df.index else 0
                         val_dir = agg_df.loc[m, f"{item}_직"] if m in agg_df.index else 0
                         val_ind = agg_df.loc[m, f"{item}_간"] if m in agg_df.index else 0

@@ -18,7 +18,7 @@ def preprocess_sales_data(uploaded_files, base_df):
     merged_df = pd.concat(df_list, ignore_index=True, sort=False)
     
     # 기본 날짜 처리
-    merged_df = merged_df[~merged_df['회계일자'].isin(['월계', '누계'])]
+    merged_df = merged_df[~merged_df['회계일자'].isin(['월계', '누계', '전일이월'])]
     merged_df['회계일자'] = pd.to_datetime(merged_df['회계일자'], format='mixed', errors='coerce')
     merged_df['회계연도'] = merged_df['회계일자'].dt.year
     merged_df['회계월'] = merged_df['회계일자'].dt.month

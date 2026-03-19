@@ -5,6 +5,7 @@ import re
 
 def distribute_indirect_cost(df, merged_df, category_name, col_name, target_mask=None, use_month_match=True):
     df[col_name] = 0
+    df[f"{col_name}_직"] = 0
     df[f"{col_name}_간"] = 0
 
     # 직접비 매칭 (기존 그대로)
@@ -16,12 +17,12 @@ def distribute_indirect_cost(df, merged_df, category_name, col_name, target_mask
     direct_map = merged_df[cond].groupby("상품ID")["대변"].sum()
     df[f"{col_name}_직"] = df["상품ID"].map(direct_map).fillna(0)
 
-    # 간접비만 월별로 계산
+    # 간접비만 월별로 계산 (df 기준으로 루프, merged_df 회계월로 합계)
     for month, month_idx in df.groupby("판매월").groups.items():
         month_mask = df.index.isin(month_idx)
 
         total_fee = merged_df.loc[
-            (merged_df["계정명"] == category_name) & (merged_df["판매월"] == month),
+            (merged_df["계정명"] == category_name) & (merged_df["회계월"] == month),
             "대변"
         ].sum()
 

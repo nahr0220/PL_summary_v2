@@ -3,31 +3,40 @@ import numpy as np
 import os
 import re
 
-def distribute_indirect_cost(df, merged_df, category_name, col_name, target_mask=None):
+def distribute_indirect_cost(df, merged_df, category_name, col_name, target_mask=None, use_month_match=True):
     df[col_name] = 0
-    # 직접비 매칭
-    cond = ((merged_df["계정명"] == category_name) & (merged_df["판매월일치여부"] == "TRUE"))
+    df[f"{col_name}_간"] = 0
+
+    # 직접비 매칭 (기존 그대로)
+    if use_month_match:
+        cond = ((merged_df["계정명"] == category_name) & (merged_df["판매월일치여부"] == "TRUE"))
+    else:
+        cond = (merged_df["계정명"] == category_name)
+
     direct_map = merged_df[cond].groupby("상품ID")["대변"].sum()
     df[f"{col_name}_직"] = df["상품ID"].map(direct_map).fillna(0)
 
-    # 전체 비용
-    total_fee = merged_df.loc[merged_df["계정명"] == category_name, "대변"].sum()
-    # 간접비 총액
-    indirect_total = total_fee - df[f"{col_name}_직"].sum()
+    # 간접비만 월별로 계산
+    for month, month_idx in df.groupby("판매월").groups.items():
+        month_mask = df.index.isin(month_idx)
 
-    # mask 결정
-    if target_mask is None:
-        mask = df[f"{col_name}_직"] > 0
-    else:
-        mask = target_mask
+        total_fee = merged_df.loc[
+            (merged_df["계정명"] == category_name) & (merged_df["판매월"] == month),
+            "대변"
+        ].sum()
 
-    n = mask.sum()
-    df[f"{col_name}_간"] = 0
-    if n > 0 and indirect_total != 0:
-        base_val = round(indirect_total / n)
-        df.loc[mask, f"{col_name}_간"] = base_val
-        diff = indirect_total - df.loc[mask, f"{col_name}_간"].sum()
-        if any(mask):
+        indirect_total = total_fee - df.loc[month_mask, f"{col_name}_직"].sum()
+
+        if target_mask is None:
+            mask = month_mask & (df[f"{col_name}_직"] > 0)
+        else:
+            mask = month_mask & target_mask
+
+        n = mask.sum()
+        if n > 0 and indirect_total != 0:
+            base_val = round(indirect_total / n)
+            df.loc[mask, f"{col_name}_간"] = base_val
+            diff = indirect_total - df.loc[mask, f"{col_name}_간"].sum()
             df.loc[df.index[mask][0], f"{col_name}_간"] += diff
 
     df[col_name] = df[f"{col_name}_직"] + df[f"{col_name}_간"]
@@ -59,7 +68,7 @@ def build_final_report(base_df, merged_df):
     final_df['매도/낙찰'] = final_df['매도'] + final_df['낙찰']
 
     finance_mask = final_df["상품/위탁"] == "상품"
-    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(금융수수료)", "금융수수료", target_mask=finance_mask)
+    final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(금융수수료)", "금융수수료", target_mask=finance_mask, use_month_match=False)
     
     final_df['기타'] = 0 
     restore_mask = ((final_df["매입유형1"] == "선물") & (final_df["매입처"]=='현대캐피탈'))

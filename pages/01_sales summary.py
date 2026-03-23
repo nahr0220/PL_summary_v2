@@ -152,6 +152,7 @@ with tab2: # UPLOAD
         base_df["판매월"] = base_df["판매일자"].dt.month
         cols = [c for c in base_df.columns if c != '판매월'] + ['판매월']
         base_df = base_df[cols]
+        base_df["판매일자"] = pd.to_datetime(base_df["판매일자"]).dt.date
 
         st.success("기준 데이터 로드 완료")
         total_cnt = len(base_df)
@@ -170,6 +171,15 @@ with tab2: # UPLOAD
         merged_df = preprocess_sales_data(u_files, base_df)
         st.session_state['merged_df'] = merged_df
 
+
+
+        # 판매연도, 판매월 필터
+        col1, col2 = st.columns(2)
+        with col1: sel_year = st.multiselect("판매연도 필터", sorted(merged_df['회계연도'].unique()), default=sorted(merged_df['회계연도'].unique()))
+        with col2: sel_month = st.multiselect("판매월 필터", sorted(merged_df['회계월'].unique()), default=sorted(merged_df['회계월'].unique()))
+        merged_df = merged_df[merged_df['회계연도'].isin(sel_year) & merged_df['회계월'].isin(sel_month)]
+
+        # 계정명 필터
         sel_acc = st.multiselect("계정명 필터", sorted(merged_df['계정명'].unique()), default=sorted(merged_df['계정명'].unique()))
         st.dataframe(merged_df[merged_df['계정명'].isin(sel_acc)], width="stretch")
 
@@ -178,6 +188,12 @@ with tab2: # UPLOAD
 
         if 'current_final' in st.session_state:
             f_df = st.session_state['current_final']
+
+            # 현황 요약
+            counts = f_df['매입유형1'].value_counts()
+            st.markdown(f"**전체:** {len(f_df):,}건 │ **상품:** {len(f_df) - counts.get('위탁', 0):,}건 │ **위탁:** {counts.get('위탁', 0):,}건 │ **매출합계:** {f_df['매출합계'].sum():,.0f}원 │ **판매월:** {f_df['판매월'].min()}월 ~ {f_df['판매월'].max()}월")
+            st.download_button("⬇ 데이터 다운로드", to_excel_with_format(f_df, highlight_after_col="판매월"), f"현재데이터_{datetime.now().strftime('%Y%m%d')}.xlsx")
+
             st.dataframe(f_df, width="stretch")
             if st.button("현재 결과를 마스터 파일에 누적 저장"):
                 fname = save_to_master(f_df, verify_file=v_file)

@@ -53,7 +53,7 @@ def build_final_report(base_df, merged_df):
     final_df = base_df.copy()
 
     final_df["상품/위탁"] = np.where(final_df["매입유형1"] == "위탁", "위탁", "상품")
-    final_df["소/도매"] = np.where(final_df["판매지점"].str.contains("리본카옥션", na=False),"도매", "소매")
+    final_df["소/도매"] = np.where(final_df["판매지점"].str.contains("옥션", na=False),"도매", "소매")
     final_df["매출합계"] = 0
 
     cond_sales = ((merged_df["계정명"] == "상품매출(자동차)") & (merged_df["판매월일치여부"] == "TRUE"))

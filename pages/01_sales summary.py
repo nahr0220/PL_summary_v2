@@ -134,9 +134,11 @@ with tab1: # VIEW
         with col1: s_yrs = st.multiselect("판매연도", sorted(master_df['판매연도'].unique()), default=sorted(master_df['판매연도'].unique()))
         with col2: s_mths = st.multiselect("판매월", sorted(master_df['판매월'].unique()), default=sorted(master_df['판매월'].unique()))
         d_df = master_df[(master_df['판매연도'].isin(s_yrs)) & (master_df['판매월'].isin(s_mths))]
+        d_df["판매일자"] = pd.to_datetime(d_df["판매일자"]).dt.date
+        d_df = d_df.drop(['고객타입', '사업자유형', '업태', '업종'], axis=1)
         display_cols = [col for col in d_df.columns if not col.endswith('_검증')]
         counts = d_df['매입유형1'].value_counts()
-        st.markdown(f"**건수:** {len(d_df):,}건 │ **상품:** {len(d_df) - counts.get('위탁', 0):,}건 │ **위탁:** {counts.get('위탁', 0):,}건 │ **매출합계:** {d_df['매출합계'].sum():,.0f}원 │ **판매월:** {d_df['판매월'].min()}월 ~ {d_df['판매월'].max()}월")
+        st.markdown(f"**건수:** {len(d_df):,}건 │ **상품매출:** {d_df['상품매출'].sum():,.0f}원 │ **용역매출:** {d_df['용역매출'].sum():,.0f}원 │ **판매월:** {d_df['판매월'].min()}월 ~ {d_df['판매월'].max()}월")
         st.dataframe(d_df[display_cols], width="stretch")
         st.download_button("⬇ 데이터 다운로드", to_excel_with_format(d_df[display_cols], highlight_after_col="판매월"), f"누적데이터_{datetime.now().strftime('%Y%m%d')}.xlsx")
     else:

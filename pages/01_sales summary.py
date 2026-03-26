@@ -168,7 +168,7 @@ with tab1: # VIEW
         counts = d_df['매입유형1'].value_counts()
         st.markdown(f"**건수:** {len(d_df):,}건 │ **상품매출:** {d_df['상품매출'].sum():,.0f}원 │ **용역매출:** {d_df['용역매출'].sum():,.0f}원 │ **판매월:** {d_df['판매월'].min()}월 ~ {d_df['판매월'].max()}월")
         st.dataframe(d_df[display_cols], width="stretch")
-        st.download_button(".xlsx", to_excel_with_format(d_df[display_cols], highlight_after_col="판매월"), f"sales_summary_{datetime.now().strftime('%Y%m%d')}.xlsx")
+        st.download_button(".xlsx", to_excel_with_format(d_df[display_cols], highlight_after_col="판매연도"), f"sales_summary_{datetime.now().strftime('%Y%m%d')}.xlsx")
     else:
         st.info("📂 아직 저장된 데이터가 없습니다.")
 
@@ -216,7 +216,7 @@ with tab2: # UPLOAD
         
         st.download_button(
             label=".xlsx",
-            data=to_excel_with_format(final_df, highlight_after_col="판매월"), # 원본merged_df가 아닌 final_df 전달
+            data=to_excel_with_format(final_df, highlight_after_col="판매연도"), # 원본merged_df가 아닌 final_df 전달
             file_name=f"sales_data_by_account_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
@@ -256,7 +256,7 @@ with tab2: # UPLOAD
             with col1:
                 st.download_button(
                     label=".xlsx", 
-                    data=to_excel_with_format(f_df, highlight_after_col="판매월"), 
+                    data=to_excel_with_format(f_df, highlight_after_col="판매연도"), 
                     file_name=f"sales_summary(확인용)_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     width='stretch'
                 )

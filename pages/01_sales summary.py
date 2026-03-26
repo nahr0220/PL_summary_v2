@@ -155,7 +155,15 @@ with tab1: # VIEW
         with col2: s_mths = st.multiselect("판매월", sorted(master_df['판매월'].unique()), default=sorted(master_df['판매월'].unique()))
         d_df = master_df[(master_df['판매연도'].isin(s_yrs)) & (master_df['판매월'].isin(s_mths))]
         d_df["판매일자"] = pd.to_datetime(d_df["판매일자"]).dt.date
-        d_df = d_df.drop(['고객타입', '사업자유형', '업태', '업종'], axis=1, errors='ignore')
+        # 1. 삭제하고 싶은 후보 리스트
+        cols_to_drop = ['고객타입', '사업자유형', '업태', '업종']
+
+        # 2. d_df에 실제로 존재하는 컬럼만 필터링 (이게 핵심!)
+        existing_cols = [col for col in cols_to_drop if col in d_df.columns]
+
+        # 3. 존재하는 게 있을 때만 drop 실행
+        if existing_cols:
+            d_df = d_df.drop(columns=existing_cols)
         display_cols = [col for col in d_df.columns if not col.endswith('_검증')]
         counts = d_df['매입유형1'].value_counts()
         st.markdown(f"**건수:** {len(d_df):,}건 │ **상품매출:** {d_df['상품매출'].sum():,.0f}원 │ **용역매출:** {d_df['용역매출'].sum():,.0f}원 │ **판매월:** {d_df['판매월'].min()}월 ~ {d_df['판매월'].max()}월")

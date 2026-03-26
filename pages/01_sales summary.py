@@ -109,12 +109,9 @@ with tab1: # VIEW
             subtotals_s = s_p.groupby(level=0).sum()
             # 정렬 시 상세 내역(소매, 도매)보다 위에 오도록 ' (합계)' 추가 (공백 포함)
             subtotals_s.index = pd.MultiIndex.from_tuples([(x, ' ') for x in subtotals_s.index])
-
-            # 기존 데이터와 항목별 합계를 합친 후 인덱스 순서로 정렬
             s_p = pd.concat([s_p, subtotals_s]).sort_index()
 
             # 4. 전체 총합계 계산 (맨 아래 유지)
-            # 중복 합산을 피하기 위해 subtotals_s의 합계만 가져와서 마지막 행에 추가
             s_p.loc[('전체', '총 판매대수'), :] = subtotals_s.sum(axis=0).values
 
             # 5. 출력
@@ -135,18 +132,12 @@ with tab1: # VIEW
             r_p = r_p.reindex(columns=range(1, 13), fill_value=0)
             r_p['연간 총합'] = r_p.sum(axis=1)
 
-            # --- 3. 항목별(상품/용역) 합계를 상단에 추가하는 로직 ---
-            # 각 매출항목(level 0)별로 합계를 계산합니다.
+            # 3. 항목별(상품/용역) 합계를 상단에 추가하는 로직
             subtotals = r_p.groupby(level=0).sum()
-            # 인덱스를 ('상품매출', '0_항목합계') 식으로 만들어서 정렬 시 상단에 오게 합니다.
             subtotals.index = pd.MultiIndex.from_tuples([(x, ' ') for x in subtotals.index])
-
-            # 기존 데이터와 항목별 합계를 합친 후 인덱스로 정렬 (상품매출 합계가 상세보다 먼저 나옴)
             r_p = pd.concat([r_p, subtotals]).sort_index()
 
             # 4. 전체 총합계 계산 (맨 아래 유지)
-            # 위에서 추가된 '항목별 합계'까지 포함해서 더하면 값이 2배가 되므로, 
-            # 기존 subtotals만 다시 더하거나 처음 r_p 상태에서 계산하는 것이 안전합니다.
             r_p.loc[('전체', '총 매출액'), :] = subtotals.sum(axis=0).values
 
             # 최종 출력
@@ -164,7 +155,7 @@ with tab1: # VIEW
         with col2: s_mths = st.multiselect("판매월", sorted(master_df['판매월'].unique()), default=sorted(master_df['판매월'].unique()))
         d_df = master_df[(master_df['판매연도'].isin(s_yrs)) & (master_df['판매월'].isin(s_mths))]
         d_df["판매일자"] = pd.to_datetime(d_df["판매일자"]).dt.date
-        d_df = d_df.drop(['고객타입', '사업자유형', '업태', '업종'], axis=1)
+        d_df = d_df.drop(['고객타입', '사업자유형', '업태', '업종'], axis=1, errors='ignore')
         display_cols = [col for col in d_df.columns if not col.endswith('_검증')]
         counts = d_df['매입유형1'].value_counts()
         st.markdown(f"**건수:** {len(d_df):,}건 │ **상품매출:** {d_df['상품매출'].sum():,.0f}원 │ **용역매출:** {d_df['용역매출'].sum():,.0f}원 │ **판매월:** {d_df['판매월'].min()}월 ~ {d_df['판매월'].max()}월")
@@ -209,17 +200,11 @@ with tab2: # UPLOAD
         with col2: 
             sel_month = st.multiselect("판매월 필터", sorted(merged_df['회계월'].unique()), default=sorted(merged_df['회계월'].unique()))
         
-        # 연도/월 필터 적용
         filtered_df = merged_df[merged_df['회계연도'].isin(sel_year) & merged_df['회계월'].isin(sel_month)]
-
-        # 2. 계정명 필터 (연도/월이 적용된 데이터 내에서만 계정명 추출)
         sel_acc = st.multiselect("계정명 필터", sorted(filtered_df['계정명'].unique()), default=sorted(filtered_df['계정명'].unique()))
-        
-        # 3. 최종 필터링된 데이터프레임 생성 (화면 출력 및 다운로드 공용)
         final_df = filtered_df[filtered_df['계정명'].isin(sel_acc)]
 
-        # 4. 화면 출력 및 다운로드 버튼
-        st.dataframe(final_df, use_container_width=True)
+        st.dataframe(final_df, width='stretch')
         
         st.download_button(
             label=".xlsx",
@@ -227,7 +212,6 @@ with tab2: # UPLOAD
             file_name=f"sales_data_by_account_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
 
         if st.button("3️⃣ 최종 매출 생성", type="primary"):
             st.session_state['current_final'] = build_final_report(base_df, merged_df)
@@ -238,10 +222,39 @@ with tab2: # UPLOAD
             # 현황 요약
             counts = f_df['매입유형1'].value_counts()
             st.markdown(f"**전체:** {len(f_df):,}건 │ **상품:** {len(f_df) - counts.get('위탁', 0):,}건 │ **위탁:** {counts.get('위탁', 0):,}건 │ **매출합계:** {f_df['매출합계'].sum():,.0f}원 │ **판매월:** {f_df['판매월'].min()}월 ~ {f_df['판매월'].max()}월")
-            st.download_button(".xlsx", to_excel_with_format(f_df, highlight_after_col="판매월"), f"sales_summary(확인용)_{datetime.now().strftime('%Y%m%d')}.xlsx")
+            
+            def mask_value(value):
+                # 값이 없거나 NaN인 경우 빈 문자열 처리
+                val_str = str(value).strip() if pd.notna(value) and str(value).strip() != "" else ""
+                
+                # 2글자 이하면 마스킹하지 않고 그대로 반환
+                if len(val_str) <= 2:
+                    return val_str
+                
+                # 앞 2글자 + 나머지 길이만큼 * 반복
+                return val_str[:2] + '*' * (len(val_str) - 2)
 
+            # 2. 마스킹을 적용하고 싶은 컬럼 리스트 정의
+            target_columns = ['매입처', '정보제공자', '판매처']
+
+            # 3. 반복문을 통해 각 컬럼에 일괄 적용
+            for col in target_columns:
+                if col in f_df.columns:  # 컬럼이 데이터프레임에 실제 존재하는 경우에만 실행
+                    f_df[col] = f_df[col].apply(mask_value)
+            
             st.dataframe(f_df, width="stretch")
-            if st.button("현재 결과를 마스터 파일에 누적 저장"):
-                fname = save_to_master(f_df, verify_file=v_file)
-                st.success(f"✅ '{fname}' 누적 저장 및 검증 완료!")
-                st.rerun()
+            col1, col2, _ = st.columns([1, 1, 5]) 
+
+            with col1:
+                st.download_button(
+                    label=".xlsx", 
+                    data=to_excel_with_format(f_df, highlight_after_col="판매월"), 
+                    file_name=f"sales_summary(확인용)_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    width='stretch'
+                )
+
+            with col2:
+                if st.button("마스터 파일에 저장", width='stretch', type="primary"):
+                    fname = save_to_master(f_df, verify_file=v_file)
+                    st.success(f"✅ 저장 완료!")
+                    st.rerun()

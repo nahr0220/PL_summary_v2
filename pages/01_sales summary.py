@@ -240,7 +240,7 @@ with tab2: # UPLOAD
                     return val_str
                 
                 # 앞 2글자 + 나머지 길이만큼 * 반복
-                return val_str[:2] + '*' * (len(val_str) - 2)
+                return val_str[:2] + '*'
 
             # 2. 마스킹을 적용하고 싶은 컬럼 리스트 정의
             target_columns = ['매입처', '정보제공자', '판매처']

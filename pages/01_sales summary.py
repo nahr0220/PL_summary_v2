@@ -4,6 +4,7 @@ from utils.excel import to_excel_with_format
 from processor import preprocess_sales_data
 from analyzer import build_final_report, save_to_master
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import os
 
 st.set_page_config(page_title="손익분석", layout="wide")
@@ -276,7 +277,7 @@ with tab2: # UPLOAD
 
             with col2:
                 if st.button("마스터 파일에 저장", width='stretch', type="primary"):
-                    f_df['updated_at'] = datetime.now()  # 업데이트 시간
+                    f_df['updated_at'] = datetime.now(ZoneInfo("Asia/Seoul")) # 업데이트 시간
                     fname = save_to_master(f_df, verify_file=v_file)
                     st.success(f"✅ 저장 완료!")
                     st.rerun()

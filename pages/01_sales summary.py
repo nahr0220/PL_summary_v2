@@ -235,11 +235,11 @@ with tab2: # UPLOAD
                 # 값이 없거나 NaN인 경우 빈 문자열 처리
                 val_str = str(value).strip() if pd.notna(value) and str(value).strip() != "" else ""
                 
-                # 2글자 이하면 마스킹하지 않고 그대로 반환
+                # 2글자 이하면 그대로 반환
                 if len(val_str) <= 2:
                     return val_str
                 
-                # 앞 2글자 + 나머지 길이만큼 * 반복
+                # 앞 2글자 + '*' 하나만
                 return val_str[:2] + '*'
 
             # 2. 마스킹을 적용하고 싶은 컬럼 리스트 정의

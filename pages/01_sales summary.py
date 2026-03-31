@@ -166,7 +166,7 @@ with tab1: # VIEW
             d_df = d_df.drop(columns=existing_cols)
         display_cols = [col for col in d_df.columns if not col.endswith('_검증')]
         counts = d_df['매입유형1'].value_counts()
-        st.markdown(f"**건수:** {len(d_df):,}건 │ **상품매출:** {d_df['상품매출'].sum():,.0f}원 │ **용역매출:** {d_df['용역매출'].sum():,.0f}원 │ **판매월:** {d_df['판매월'].min()}월 ~ {d_df['판매월'].max()}월")
+        st.markdown(f"**대수:** {len(d_df):,}건 │ **상품매출:** {d_df['상품매출'].sum():,.0f}원 │ **용역매출:** {d_df['용역매출'].sum():,.0f}원 │ **판매월:** {d_df['판매월'].min()}월 ~ {d_df['판매월'].max()}월")
         st.dataframe(d_df[display_cols], width="stretch")
         st.download_button(".xlsx", to_excel_with_format(d_df[display_cols], highlight_after_col="판매연도"), f"sales_summary_{datetime.now().strftime('%Y%m%d')}.xlsx")
     else:

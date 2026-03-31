@@ -11,27 +11,40 @@ st.title("Sales Summary")
 
 tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])
 
-with tab1: # VIEW
+with tab1:  # VIEW
     master_file = "master_pnl.xlsx"
     if os.path.exists(master_file) and os.path.getsize(master_file) > 0:
-        mtime = os.path.getmtime(master_file)
-        last_updated = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
+        
+        master_df = pd.read_excel(master_file)
+
+        # ✅ 최근 업데이트 시간 (데이터 기준)
+        if 'updated_at' in master_df.columns and not master_df['updated_at'].isna().all():
+            last_updated = pd.to_datetime(master_df['updated_at']).max().strftime('%Y-%m-%d %H:%M:%S')
+        else:
+            last_updated = "-"
+
         col_space, col_btn = st.columns([8, 2])
         with col_btn:
             if st.button("🗑️ 전체 데이터 초기화", type="primary", width="stretch"):
                 st.session_state['delete_confirm'] = True
-            st.markdown(f"<p style='text-align: right; color: gray; font-size: 0.75rem; margin-top: -10px;'>* 최근 업데이트: {last_updated}</p>", unsafe_allow_html=True)
-        
+
+            st.markdown(
+                f"<p style='text-align: right; color: gray; font-size: 0.75rem; margin-top: -10px;'>* 최근 업데이트: {last_updated}</p>",
+                unsafe_allow_html=True
+            )
+
         if st.session_state.get('delete_confirm'):
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("✅ 삭제", width="stretch"):
-                    os.remove(master_file); st.session_state['delete_confirm'] = False; st.rerun()
+                    os.remove(master_file)
+                    st.session_state['delete_confirm'] = False
+                    st.rerun()
             with c2:
                 if st.button("❌ 취소", width="stretch"):
-                    st.session_state['delete_confirm'] = False; st.rerun()
+                    st.session_state['delete_confirm'] = False
+                    st.rerun()
 
-        master_df = pd.read_excel(master_file)
         order = ['소매', '도매']
         master_df['소/도매'] = pd.Categorical(master_df['소/도매'], categories=order, ordered=True)
 
@@ -263,6 +276,7 @@ with tab2: # UPLOAD
 
             with col2:
                 if st.button("마스터 파일에 저장", width='stretch', type="primary"):
+                    f_df['updated_at'] = datetime.now()  # 업데이트 시간
                     fname = save_to_master(f_df, verify_file=v_file)
                     st.success(f"✅ 저장 완료!")
                     st.rerun()

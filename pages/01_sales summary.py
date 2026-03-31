@@ -198,7 +198,7 @@ with tab2: # UPLOAD
         base_df = base_df[cols]
         base_df["판매일자"] = pd.to_datetime(base_df["판매일자"]).dt.date
 
-        st.success("기준 데이터 로드 완료")
+        # st.success("기준 데이터 로드 완료")
         total_cnt = len(base_df)
         consign_cnt = (base_df['매입유형1'] == '위탁').sum()
         product_cnt = total_cnt - consign_cnt

@@ -18,11 +18,17 @@ with tab1:  # VIEW (매출요약정보)
         
         master_df = pd.read_excel(master_file)
 
-        # ✅ 최근 업데이트 시간 (데이터 기준)
-        if 'updated_at' in master_df.columns and not master_df['updated_at'].isna().all():
-            last_updated = pd.to_datetime(master_df['updated_at']).max().strftime('%Y-%m-%d %H:%M:%S')
-        else:
-            last_updated = "-"
+        # ✅ 최근 업데이트 시간 (데이터 내 컬럼 혹은 파일 시스템의 수정 시간 기준)
+        try:
+            # 'updated_at' 컬럼이 있고, 비어있지 않은 경우
+            if 'updated_at' in master_df.columns and not master_df['updated_at'].isna().all():
+                last_updated = pd.to_datetime(master_df['updated_at']).max().strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                raise ValueError("updated_at column is empty or missing valid data") # 강제로 except 블록으로 이동
+        except Exception: # 컬럼 누락, 데이터 오류 등 모든 예외 상황에서 파일 시스템 시간으로 대체
+            # 컬럼이 없거나 에러 시 파일의 실제 수정 시간 표시
+            mtime = os.path.getmtime(master_file)
+            last_updated = datetime.fromtimestamp(mtime, tz=ZoneInfo("Asia/Seoul")).strftime('%Y-%m-%d %H:%M:%S')
 
         col_space, col_btn = st.columns([8, 2])
         with col_btn:
@@ -264,10 +270,8 @@ with tab2: # UPLOAD
         sel_acc = st.multiselect("계정명 필터", sorted(filtered_df['계정명'].unique()), default=sorted(filtered_df['계정명'].unique()))
         final_df = filtered_df[filtered_df['계정명'].isin(sel_acc)]
 
-        # 필터링된 데이터 요약 한 줄 추가
-        st.markdown(f"** 선택 데이터:** {len(final_df):,}대 │ **대변 합계:** {final_df['대변'].sum():,.0f}원")
-
-
+        # 💡 필터링된 데이터 요약 한 줄 추가
+        st.info(f"📊 **선택된 데이터:** {len(final_df):,}건 │ 💰 **대변 합계:** {final_df['대변'].sum():,.0f}원")
         st.dataframe(final_df, width='stretch')
         
         st.download_button(

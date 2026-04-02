@@ -149,6 +149,28 @@ with tab1:  # VIEW (매출요약정보)
             if col in d_df.columns:
                 d_df[col] = d_df[col].apply(mask_value)
 
+        #d_df['매입지점']이랑 master_hr.xlsx파일의 hr_map_df['팀']과 일치하는 본부, 실  가져오기 이름은 매입본부, 매입실로 지정
+
+
+        hr_map_df = pd.read_excel("master_hr.xlsx")
+        d_df = d_df.merge(
+            hr_map_df[['팀', '본부', '실']],
+            left_on='매입지점',
+            right_on='팀',
+            how='left'
+        )
+        d_df = d_df.rename(columns={'본부': '매입본부', '실': '매입실'})
+        # d_df = d_df.merge(
+        #             hr_map_df[['팀', '본부', '실']],
+        #             left_on='판매지점',
+        #             right_on='팀',
+        #             how='left'
+        #         )
+        # d_df = d_df.rename(columns={'본부': '판매본부', '실': '판매실'})
+
+
+
+
         # 1. 삭제하고 싶은 후보 리스트
         cols_to_drop = ['고객타입', '사업자유형', '업태', '업종']
 

@@ -3,3 +3,4 @@ pandas>=2.0.0
 openpyxl
 xlsxwriter
 altair<5
+xlrd>=2.0.1

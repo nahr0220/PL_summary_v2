@@ -49,118 +49,6 @@ with tab1:  # VIEW (매출요약정보)
         order = ['소매', '도매']
         master_df['소/도매'] = pd.Categorical(master_df['소/도매'], categories=order, ordered=True)
 
-        with st.expander("더존 PL(단위:원)", expanded = False):
-            indirect_items = ['원상회복', '연회비', '매도', '낙찰', '위탁', '평가사수수료', '금융수수료', '리본케어','리본케어플러스', '성능보증', '탁송비']
-            all_months_numeric = list(range(1, 13)) 
-            monthly_data = []
-
-            items_to_show = ["상품매출"] + indirect_items
-            for i, item in enumerate(items_to_show, start=1):
-                if item in master_df.columns:
-                    display_name = f"{i:02d}. {item}"
-                    for m in all_months_numeric:
-                        m_df = master_df[master_df['판매월'] == m]
-                        val_total = m_df[item].sum()
-                        
-                        monthly_data.append({"항목": display_name, "구분": "0. 합계", "판매월": m, "금액": val_total})
-                        if f"{item}_직" in m_df.columns:
-                            monthly_data.append({"항목": display_name, "구분": "1. 직접", "판매월": m, "금액": m_df[f"{item}_직"].sum()})
-                        if f"{item}_간" in m_df.columns:
-                            monthly_data.append({"항목": display_name, "구분": "2. 간접", "판매월": m, "금액": m_df[f"{item}_간"].sum()})
-
-            # 00. 총합계 계산 (VIEW 섹션 상단 노출용)
-            for m in all_months_numeric:
-                m_total = master_df[master_df['판매월'] == m][items_to_show].sum().sum()
-                monthly_data.append({"항목": "00. 총합계", "구분": " ", "판매월": m, "금액": m_total})
-
-            if monthly_data:
-                pivot_df = pd.DataFrame(monthly_data).pivot_table(
-                    index=["항목", "구분"], columns="판매월", values="금액", aggfunc="sum", fill_value=0, observed=False
-                )
-                pivot_df = pivot_df.reindex(columns=all_months_numeric, fill_value=0)
-                pivot_df.columns = pivot_df.columns.astype(str)
-                
-                def format_with_status(val, col_name, row_idx):
-                    if val == 0: return "-"
-                    if "00. 총합계" not in row_idx[0] and "합계" in row_idx[1]:
-                        item_raw = row_idx[0].split(". ")[1]
-                        v_col = f"{item_raw}_검증"
-                        m_df = master_df[master_df['판매월'] == int(col_name)]
-                        if not m_df.empty and v_col in m_df.columns:
-                            icon = " ✅" if m_df[v_col].all() else " ❌"
-                            return f"{val:,.0f}{icon}"
-                    return f"{val:,.0f}"
-
-                def apply_row_style(s):
-                    if "00. 총합계" in str(s.name[0]):
-                        return ['background-color: #e6f3ff; font-weight: bold; border-bottom: 2px solid #004c99'] * len(s)
-                    if "합계" in str(s.name[1]):
-                        return ['background-color: #f8f9fb; font-weight: bold'] * len(s)
-                    return [''] * len(s)
-
-                formatted_df = pivot_df.copy().astype(object)
-                for col in pivot_df.columns:
-                    for idx in pivot_df.index:
-                        formatted_df.loc[idx, col] = format_with_status(pivot_df.loc[idx, col], col, idx)
-
-                st.dataframe(formatted_df.style.apply(apply_row_style, axis=1), width="stretch")
-
-        # 한 줄에 2개의 expander 배치
-        col_left, col_right = st.columns(2)
-        with col_left:
-            with st.expander("거래처 정보", expanded=False):
-                vendor_file = "master_vendor.xlsx"
-                
-                # 1. 파일 업로드 위젯
-                uploaded_v_file = st.file_uploader("거래처 매핑 파일 업로드 (.xlsx)", type=["xlsx"])
-                uploaded_v_file = st.file_uploader("거래처 매핑 파일 업로드 (.xlsx)", type=["xlsx"], key="vendor_uploader")
-                
-                if uploaded_v_file:
-                    # 파일 저장 버튼 (확인 절차)
-                    if st.button("💾 업로드 파일로 데이터 교체", use_container_width=True, type="primary"):
-                        new_v_df = pd.read_excel(uploaded_v_file)
-                        new_v_df.to_excel(vendor_file, index=False)
-                        st.success("✅ 거래처 매핑 정보가 성공적으로 업데이트되었습니다.")
-                        st.rerun() # 화면 갱신하여 하단 표 업데이트
-                        
-                        # 필수 컬럼 확인
-                        required_vendor_cols = ["거래처", "거래처_정규화"]
-                        if not all(col in new_v_df.columns for col in required_vendor_cols):
-                            st.error(f"❌ 업로드된 파일에 필수 컬럼이 없습니다. 다음 컬럼들이 필요합니다: {', '.join(required_vendor_cols)}")
-                        else:
-                            new_v_df.to_excel(vendor_file, index=False)
-                            st.success("✅ 거래처 매핑 정보가 성공적으로 업데이트되었습니다.")
-                            st.rerun() # 화면 갱신하여 하단 표 업데이트
-
-                # 2. 현재 서버에 저장되어 있는 데이터 표시
-                if os.path.exists(vendor_file):
-                    vendor_df = pd.read_excel(vendor_file)
-                    st.markdown("---")
-                    st.write("**거래처 정보**")
-                    st.dataframe(vendor_df, use_container_width=True, hide_index=True)
-
-        with col_right:
-            with st.expander("인사정보", expanded=False):
-                hr_file = "master_hr.xlsx"
-
-                # 1. 파일 업로드 위젯
-                uploaded_hr_file = st.file_uploader("인사 정보 파일 업로드 (.xlsx)", type=["xlsx"])
-
-                if uploaded_hr_file:
-                    if st.button("💾 업로드 파일로 인사 데이터 교체", use_container_width=True, type="primary"):
-                        new_hr_df = pd.read_excel(uploaded_hr_file)
-                        new_hr_df.to_excel(hr_file, index=False)
-                        st.success("✅ 인사 정보가 성공적으로 업데이트되었습니다.")
-                        st.rerun()
-
-                # 2. 현재 서버에 저장되어 있는 데이터 표시
-                if os.path.exists(hr_file):
-                    hr_df = pd.read_excel(hr_file)
-                    st.markdown("---")
-                    st.write("**현재 인사 정보**")
-                    st.dataframe(hr_df, use_container_width=True, hide_index=True)
-
-        
         def style_dataframe(df):
             return df.style.format(lambda x: '-' if x == 0 else f"{x:,.0f}").set_properties(**{'text-align': 'right', 'font-size': '13px'}) \
                 .apply(lambda x: ['background-color: #e6f3ff; font-weight: bold; border-top: 2px solid #004c99' 
@@ -236,9 +124,104 @@ with tab1:  # VIEW (매출요약정보)
             d_df = d_df.drop(columns=existing_cols)
         display_cols = [col for col in d_df.columns if not col.endswith('_검증')]
         counts = d_df['매입유형1'].value_counts()
-        st.markdown(f"**대수:** {len(d_df):,}건 │ **상품매출:** {d_df['상품매출'].sum():,.0f}원 │ **용역매출:** {d_df['용역매출'].sum():,.0f}원 │ **판매월:** {d_df['판매월'].min()}월 ~ {d_df['판매월'].max()}월")
+        st.markdown(f"**대수:** {len(d_df):,}대 │ **상품매출:** {d_df['상품매출'].sum():,.0f}원 │ **용역매출:** {d_df['용역매출'].sum():,.0f}원 │ **판매월:** {d_df['판매월'].min()}월 ~ {d_df['판매월'].max()}월")
         st.dataframe(d_df[display_cols], width="stretch")
         st.download_button(".xlsx", to_excel_with_format(d_df[display_cols], highlight_after_col="판매연도"), f"sales_summary_{datetime.now().strftime('%Y%m%d')}.xlsx")
+
+        # 하단에 분석 및 관리 섹션 배치
+        st.divider()
+        with st.expander("더존 PL(단위:원)", expanded=False):
+            indirect_items = ['원상회복', '연회비', '매도', '낙찰', '위탁', '평가사수수료', '금융수수료', '리본케어','리본케어플러스', '성능보증', '탁송비']
+            all_months_numeric = list(range(1, 13)) 
+            monthly_data = []
+            items_to_show = ["상품매출"] + indirect_items
+            for i, item in enumerate(items_to_show, start=1):
+                if item in master_df.columns:
+                    display_name = f"{i:02d}. {item}"
+                    for m in all_months_numeric:
+                        m_df = master_df[master_df['판매월'] == m]
+                        val_total = m_df[item].sum()
+                        monthly_data.append({"항목": display_name, "구분": "0. 합계", "판매월": m, "금액": val_total})
+                        if f"{item}_직" in m_df.columns:
+                            monthly_data.append({"항목": display_name, "구분": "1. 직접", "판매월": m, "금액": m_df[f"{item}_직"].sum()})
+                        if f"{item}_간" in m_df.columns:
+                            monthly_data.append({"항목": display_name, "구분": "2. 간접", "판매월": m, "금액": m_df[f"{item}_간"].sum()})
+            for m in all_months_numeric:
+                m_total = master_df[master_df['판매월'] == m][items_to_show].sum().sum()
+                monthly_data.append({"항목": "00. 총합계", "구분": " ", "판매월": m, "금액": m_total})
+
+            if monthly_data:
+                pivot_df = pd.DataFrame(monthly_data).pivot_table(index=["항목", "구분"], columns="판매월", values="금액", aggfunc="sum", fill_value=0, observed=False)
+                pivot_df = pivot_df.reindex(columns=all_months_numeric, fill_value=0)
+                pivot_df.columns = pivot_df.columns.astype(str)
+                
+                def format_with_status(val, col_name, row_idx):
+                    if val == 0: return "-"
+                    if "00. 총합계" not in row_idx[0] and "합계" in row_idx[1]:
+                        item_raw = row_idx[0].split(". ")[1]
+                        v_col = f"{item_raw}_검증"
+                        m_df = master_df[master_df['판매월'] == int(col_name)]
+                        if not m_df.empty and v_col in m_df.columns:
+                            icon = " ✅" if m_df[v_col].all() else " ❌"
+                            return f"{val:,.0f}{icon}"
+                    return f"{val:,.0f}"
+
+                def apply_row_style(s):
+                    if "00. 총합계" in str(s.name[0]):
+                        return ['background-color: #e6f3ff; font-weight: bold; border-bottom: 2px solid #004c99'] * len(s)
+                    if "합계" in str(s.name[1]):
+                        return ['background-color: #f8f9fb; font-weight: bold'] * len(s)
+                    return [''] * len(s)
+
+                formatted_df = pivot_df.copy().astype(object)
+                for col in pivot_df.columns:
+                    for idx in pivot_df.index:
+                        formatted_df.loc[idx, col] = format_with_status(pivot_df.loc[idx, col], col, idx)
+                st.dataframe(formatted_df.style.apply(apply_row_style, axis=1), use_container_width=True)
+
+        col_left, col_right = st.columns(2)
+        with col_left:
+            with st.expander("거래처 정보 관리", expanded=False):
+                vendor_file = "master_vendor.xlsx"
+                uploaded_v_file = st.file_uploader("거래처 매핑 파일 업로드 (.xlsx)", type=["xlsx"], key="vendor_uploader")
+                
+                if uploaded_v_file:
+                    if st.button("💾 거래처 데이터 교체", use_container_width=True, type="primary", key="btn_vendor"):
+                        new_v_df = pd.read_excel(uploaded_v_file)
+                        required_vendor_cols = ["거래처", "거래처_정규화"]
+                        if not all(col in new_v_df.columns for col in required_vendor_cols):
+                            st.error(f"❌ 필수 컬럼이 없습니다: {', '.join(required_vendor_cols)}")
+                        else:
+                            new_v_df.to_excel(vendor_file, index=False)
+                            st.success("✅ 거래처 매핑 업데이트 완료")
+                            st.rerun()
+
+                if os.path.exists(vendor_file):
+                    vendor_df = pd.read_excel(vendor_file)
+                    st.write("**현재 거래처 정보**")
+                    st.dataframe(vendor_df, use_container_width=True, hide_index=True)
+
+        with col_right:
+            with st.expander("인사 정보 관리", expanded=False):
+                hr_file = "master_hr.xlsx"
+                uploaded_hr_file = st.file_uploader("인사 정보 파일 업로드 (.xlsx)", type=["xlsx"], key="hr_uploader")
+
+                if uploaded_hr_file:
+                    if st.button("💾 인사 데이터 교체", use_container_width=True, type="primary", key="btn_hr"):
+                        new_hr_df = pd.read_excel(uploaded_hr_file)
+                        required_hr_cols = ["기준월", "부서", "이름", "급여"]
+                        if not all(col in new_hr_df.columns for col in required_hr_cols):
+                            st.error(f"❌ 필수 컬럼이 없습니다: {', '.join(required_hr_cols)}")
+                        else:
+                            new_hr_df.to_excel(hr_file, index=False)
+                            st.success("✅ 인사 정보 업데이트 완료")
+                            st.rerun()
+
+                if os.path.exists(hr_file):
+                    hr_df = pd.read_excel(hr_file)
+                    st.write("**현재 인사 정보**")
+                    st.dataframe(hr_df, use_container_width=True, hide_index=True)
+
     else:
         st.info("📂 아직 저장된 데이터가 없습니다.")
 
@@ -254,11 +237,10 @@ with tab2: # UPLOAD
         base_df = base_df[cols]
         base_df["판매일자"] = pd.to_datetime(base_df["판매일자"]).dt.date
 
-        # st.success("기준 데이터 로드 완료")
         total_cnt = len(base_df)
         consign_cnt = (base_df['매입유형1'] == '위탁').sum()
         product_cnt = total_cnt - consign_cnt
-        st.markdown(f"**전체:** {total_cnt:,}건 │ **상품:** {product_cnt:,}건 │ **위탁:** {consign_cnt:,}건 │ **판매월:** {base_df['판매월'].min()}월 ~ {base_df['판매월'].max()}월")
+        st.markdown(f"**전체:** {total_cnt:,}대 │ **상품:** {product_cnt:,}대 │ **위탁:** {consign_cnt:,}대 │ **판매월:** {base_df['판매월'].min()}월 ~ {base_df['판매월'].max()}월")
         st.dataframe(base_df, width="stretch")
 
     st.divider()
@@ -282,6 +264,10 @@ with tab2: # UPLOAD
         sel_acc = st.multiselect("계정명 필터", sorted(filtered_df['계정명'].unique()), default=sorted(filtered_df['계정명'].unique()))
         final_df = filtered_df[filtered_df['계정명'].isin(sel_acc)]
 
+        # 필터링된 데이터 요약 한 줄 추가
+        st.markdown(f"** 선택 데이터:** {len(final_df):,}대 │ **대변 합계:** {final_df['대변'].sum():,.0f}원")
+
+
         st.dataframe(final_df, width='stretch')
         
         st.download_button(
@@ -299,7 +285,7 @@ with tab2: # UPLOAD
 
             # 현황 요약
             counts = f_df['매입유형1'].value_counts()
-            st.markdown(f"**전체:** {len(f_df):,}건 │ **상품:** {len(f_df) - counts.get('위탁', 0):,}건 │ **위탁:** {counts.get('위탁', 0):,}건 │ **매출합계:** {f_df['매출합계'].sum():,.0f}원 │ **판매월:** {f_df['판매월'].min()}월 ~ {f_df['판매월'].max()}월")
+            st.markdown(f"**전체:** {len(f_df):,}대 │ **상품:** {len(f_df) - counts.get('위탁', 0):,}대 │ **위탁:** {counts.get('위탁', 0):,}대 │ **매출합계:** {f_df['매출합계'].sum():,.0f}원 │ **판매월:** {f_df['판매월'].min()}월 ~ {f_df['판매월'].max()}월")
             
             def mask_value(value):
                 # 값이 없거나 NaN인 경우 빈 문자열 처리

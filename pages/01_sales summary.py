@@ -7,6 +7,17 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
 
+def mask_value(value):
+    # 값이 없거나 NaN인 경우 빈 문자열 처리
+    val_str = str(value).strip() if pd.notna(value) and str(value).strip() != "" else ""
+    
+    # 2글자 이하면 그대로 반환
+    if len(val_str) <= 2:
+        return val_str
+    
+    # 앞 2글자 + '*' 하나만 (개인정보 보호용)
+    return val_str[:2] + '*'
+
 st.set_page_config(page_title="손익분석", layout="wide")
 st.title("Sales Summary")
 
@@ -119,6 +130,25 @@ with tab1:  # VIEW (매출요약정보)
         with col2: s_mths = st.multiselect("판매월", sorted(master_df['판매월'].unique()), default=sorted(master_df['판매월'].unique()))
         d_df = master_df[(master_df['판매연도'].isin(s_yrs)) & (master_df['판매월'].isin(s_mths))]
         d_df["판매일자"] = pd.to_datetime(d_df["판매일자"]).dt.date
+
+        # ✅ 매입처 기준 정규화 매핑 정보 결합
+        vendor_file = "master_vendor.xlsx"
+        if os.path.exists(vendor_file):
+            v_map_df = pd.read_excel(vendor_file).drop_duplicates('거래처')
+            # 기존에 컬럼이 중복될 경우를 대비해 삭제 후 병합
+            d_df = d_df.drop(columns=['거래처_정정'], errors='ignore')
+            # d_df의 '매입처'와 매핑 파일의 '거래처'를 매칭
+            d_df = d_df.merge(v_map_df[['거래처', '거래처_정정']], left_on='매입처', right_on='거래처', how='left')
+            d_df = d_df.drop(columns=['거래처'], errors='ignore') # 중복된 키 컬럼 삭제
+            d_df = d_df.rename(columns={'거래처_정정': '매입처 구분'})
+            d_df['매입처 구분'] = d_df['매입처 구분'].fillna('기타') # 매칭되지 않은 데이터는 '기타'로 처리
+
+        # ✅ 화면 표시 직전에 마스킹 적용 (매핑이 완료된 원본 데이터를 사용한 후 변조)
+        target_mask_cols = ['매입처', '정보제공자', '판매처']
+        for col in target_mask_cols:
+            if col in d_df.columns:
+                d_df[col] = d_df[col].apply(mask_value)
+
         # 1. 삭제하고 싶은 후보 리스트
         cols_to_drop = ['고객타입', '사업자유형', '업태', '업종']
 
@@ -194,7 +224,7 @@ with tab1:  # VIEW (매출요약정보)
                 if uploaded_v_file:
                     if st.button("💾 거래처 데이터 교체", use_container_width=True, type="primary", key="btn_vendor"):
                         new_v_df = pd.read_excel(uploaded_v_file)
-                        required_vendor_cols = ["거래처", "거래처_정규화"]
+                        required_vendor_cols = ["거래처", "거래처_정정"]
                         if not all(col in new_v_df.columns for col in required_vendor_cols):
                             st.error(f"❌ 필수 컬럼이 없습니다: {', '.join(required_vendor_cols)}")
                         else:
@@ -205,7 +235,7 @@ with tab1:  # VIEW (매출요약정보)
                 if os.path.exists(vendor_file):
                     vendor_df = pd.read_excel(vendor_file)
                     st.write("**현재 거래처 정보**")
-                    st.dataframe(vendor_df, use_container_width=True, hide_index=True)
+                    st.dataframe(vendor_df.rename(columns={'거래처_정정': '매입처 구분'}), use_container_width=True, hide_index=True)
 
         with col_right:
             with st.expander("인사 정보 관리", expanded=False):
@@ -291,25 +321,6 @@ with tab2: # UPLOAD
             counts = f_df['매입유형1'].value_counts()
             st.markdown(f"**전체:** {len(f_df):,}대 │ **상품:** {len(f_df) - counts.get('위탁', 0):,}대 │ **위탁:** {counts.get('위탁', 0):,}대 │ **매출합계:** {f_df['매출합계'].sum():,.0f}원 │ **판매월:** {f_df['판매월'].min()}월 ~ {f_df['판매월'].max()}월")
             
-            def mask_value(value):
-                # 값이 없거나 NaN인 경우 빈 문자열 처리
-                val_str = str(value).strip() if pd.notna(value) and str(value).strip() != "" else ""
-                
-                # 2글자 이하면 그대로 반환
-                if len(val_str) <= 2:
-                    return val_str
-                
-                # 앞 2글자 + '*' 하나만
-                return val_str[:2] + '*'
-
-            # 2. 마스킹을 적용하고 싶은 컬럼 리스트 정의
-            target_columns = ['매입처', '정보제공자', '판매처']
-
-            # 3. 반복문을 통해 각 컬럼에 일괄 적용
-            for col in target_columns:
-                if col in f_df.columns:  # 컬럼이 데이터프레임에 실제 존재하는 경우에만 실행
-                    f_df[col] = f_df[col].apply(mask_value)
-            
             st.dataframe(f_df, width="stretch")
             col1, col2, _ = st.columns([1, 1, 5]) 
 
@@ -323,7 +334,6 @@ with tab2: # UPLOAD
 
             with col2:
                 if st.button("마스터 파일에 저장", width='stretch', type="primary"):
-                    # f_df['updated_at'] = datetime.now(ZoneInfo("Asia/Seoul")).strftime('%Y-%m-%d %H:%M:%S') # 업데이트 시간
                     fname = save_to_master(f_df, verify_file=v_file)
                     st.success(f"✅ 저장 완료!")
                     st.rerun()

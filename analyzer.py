@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import os
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 def distribute_indirect_cost(df, merged_df, category_name, col_name, target_mask=None, use_month_match=True):
     df[col_name] = 0
@@ -87,6 +89,8 @@ def build_final_report(base_df, merged_df):
     final_df['기타'] = final_df['원상회복'] + final_df['연회비'] + final_df['평가사수수료'] + final_df['리본케어'] + final_df['리본케어플러스']  + final_df['성능보증'] + final_df['탁송비']
     final_df['용역매출'] = final_df['매도/낙찰'] + final_df['위탁'] + final_df['금융수수료'] + final_df['기타']
     final_df['매출합계'] = final_df['상품매출'] + final_df['용역매출']
+  
+    final_df['updated_at'] = datetime.now(ZoneInfo("Asia/Seoul")).strftime('%Y-%m-%d %H:%M:%S')
 
     return final_df
 

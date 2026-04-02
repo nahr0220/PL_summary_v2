@@ -1,9 +1,17 @@
 import streamlit as st
 
-st.set_page_config(page_title="summary 산출 시스템", layout="wide")
+st.set_page_config(page_title="손익분석", layout="wide")
+st.title("Cost Summary")
 
-st.title("😭 준비중이다.")
-# st.markdown("---")
-# st.subheader("반갑습니다! 업무를 시작하시려면 왼쪽 메뉴를 선택해주세요.")
+tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])
 
-# st.info("👈 왼쪽 사이드바에서 [01 손익분석]을 클릭하세요.")
+# with tab1:  # view (비용요약정보)
+
+
+
+
+
+
+
+# with tab2:  # upload (비용요약정보 업로드)
+    

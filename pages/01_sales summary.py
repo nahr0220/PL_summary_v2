@@ -12,7 +12,7 @@ st.title("Sales Summary")
 
 tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])
 
-with tab1:  # VIEW
+with tab1:  # VIEW (매출요약정보)
     master_file = "master_pnl.xlsx"
     if os.path.exists(master_file) and os.path.getsize(master_file) > 0:
         
@@ -49,7 +49,7 @@ with tab1:  # VIEW
         order = ['소매', '도매']
         master_df['소/도매'] = pd.Categorical(master_df['소/도매'], categories=order, ordered=True)
 
-        with st.expander("더존 PL(단위:원)", expanded=True):
+        with st.expander("더존 PL(단위:원)", expanded = False):
             indirect_items = ['원상회복', '연회비', '매도', '낙찰', '위탁', '평가사수수료', '금융수수료', '리본케어','리본케어플러스', '성능보증', '탁송비']
             all_months_numeric = list(range(1, 13)) 
             monthly_data = []
@@ -105,6 +105,62 @@ with tab1:  # VIEW
 
                 st.dataframe(formatted_df.style.apply(apply_row_style, axis=1), width="stretch")
 
+        # 한 줄에 2개의 expander 배치
+        col_left, col_right = st.columns(2)
+        with col_left:
+            with st.expander("거래처 정보", expanded=False):
+                vendor_file = "master_vendor.xlsx"
+                
+                # 1. 파일 업로드 위젯
+                uploaded_v_file = st.file_uploader("거래처 매핑 파일 업로드 (.xlsx)", type=["xlsx"])
+                uploaded_v_file = st.file_uploader("거래처 매핑 파일 업로드 (.xlsx)", type=["xlsx"], key="vendor_uploader")
+                
+                if uploaded_v_file:
+                    # 파일 저장 버튼 (확인 절차)
+                    if st.button("💾 업로드 파일로 데이터 교체", use_container_width=True, type="primary"):
+                        new_v_df = pd.read_excel(uploaded_v_file)
+                        new_v_df.to_excel(vendor_file, index=False)
+                        st.success("✅ 거래처 매핑 정보가 성공적으로 업데이트되었습니다.")
+                        st.rerun() # 화면 갱신하여 하단 표 업데이트
+                        
+                        # 필수 컬럼 확인
+                        required_vendor_cols = ["거래처", "거래처_정규화"]
+                        if not all(col in new_v_df.columns for col in required_vendor_cols):
+                            st.error(f"❌ 업로드된 파일에 필수 컬럼이 없습니다. 다음 컬럼들이 필요합니다: {', '.join(required_vendor_cols)}")
+                        else:
+                            new_v_df.to_excel(vendor_file, index=False)
+                            st.success("✅ 거래처 매핑 정보가 성공적으로 업데이트되었습니다.")
+                            st.rerun() # 화면 갱신하여 하단 표 업데이트
+
+                # 2. 현재 서버에 저장되어 있는 데이터 표시
+                if os.path.exists(vendor_file):
+                    vendor_df = pd.read_excel(vendor_file)
+                    st.markdown("---")
+                    st.write("**거래처 정보**")
+                    st.dataframe(vendor_df, use_container_width=True, hide_index=True)
+
+        with col_right:
+            with st.expander("인사정보", expanded=False):
+                hr_file = "master_hr.xlsx"
+
+                # 1. 파일 업로드 위젯
+                uploaded_hr_file = st.file_uploader("인사 정보 파일 업로드 (.xlsx)", type=["xlsx"])
+
+                if uploaded_hr_file:
+                    if st.button("💾 업로드 파일로 인사 데이터 교체", use_container_width=True, type="primary"):
+                        new_hr_df = pd.read_excel(uploaded_hr_file)
+                        new_hr_df.to_excel(hr_file, index=False)
+                        st.success("✅ 인사 정보가 성공적으로 업데이트되었습니다.")
+                        st.rerun()
+
+                # 2. 현재 서버에 저장되어 있는 데이터 표시
+                if os.path.exists(hr_file):
+                    hr_df = pd.read_excel(hr_file)
+                    st.markdown("---")
+                    st.write("**현재 인사 정보**")
+                    st.dataframe(hr_df, use_container_width=True, hide_index=True)
+
+        
         def style_dataframe(df):
             return df.style.format(lambda x: '-' if x == 0 else f"{x:,.0f}").set_properties(**{'text-align': 'right', 'font-size': '13px'}) \
                 .apply(lambda x: ['background-color: #e6f3ff; font-weight: bold; border-top: 2px solid #004c99' 

@@ -271,7 +271,7 @@ with tab2: # UPLOAD
         final_df = filtered_df[filtered_df['계정명'].isin(sel_acc)]
 
         # 💡 필터링된 데이터 요약 한 줄 추가
-        st.info(f"📊 **선택된 데이터:** {len(final_df):,}건 │ 💰 **대변 합계:** {final_df['대변'].sum():,.0f}원")
+        st.markdown(f"**선택된 데이터:** {len(final_df):,}건 │ **대변 합계:** {final_df['대변'].sum():,.0f}원")
         st.dataframe(final_df, width='stretch')
         
         st.download_button(
@@ -323,7 +323,7 @@ with tab2: # UPLOAD
 
             with col2:
                 if st.button("마스터 파일에 저장", width='stretch', type="primary"):
-                    f_df['updated_at'] = datetime.now(ZoneInfo("Asia/Seoul")).strftime('%Y-%m-%d %H:%M:%S') # 업데이트 시간
+                    # f_df['updated_at'] = datetime.now(ZoneInfo("Asia/Seoul")).strftime('%Y-%m-%d %H:%M:%S') # 업데이트 시간
                     fname = save_to_master(f_df, verify_file=v_file)
                     st.success(f"✅ 저장 완료!")
                     st.rerun()

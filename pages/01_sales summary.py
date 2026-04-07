@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 from utils.excel import to_excel_with_format
 from processor import preprocess_sales_data
 from analyzer import build_final_report, save_to_master
@@ -151,25 +152,49 @@ with tab1:  # VIEW (매출요약정보)
 
         #d_df['매입지점']이랑 master_hr.xlsx파일의 hr_map_df['팀']과 일치하는 본부, 실  가져오기 이름은 매입본부, 매입실로 지정
 
+        d_df['>>컬럼구분>>'] = ''
 
         hr_map_df = pd.read_excel("master_hr.xlsx")
+
         d_df = d_df.merge(
-            hr_map_df[['팀', '본부', '실']],
+            hr_map_df[['팀', '본부', '실', '팀_정정']],
             left_on='매입지점',
             right_on='팀',
             how='left'
         )
-        d_df = d_df.rename(columns={'본부': '매입본부', '실': '매입실'})
-        # d_df = d_df.merge(
-        #             hr_map_df[['팀', '본부', '실']],
-        #             left_on='판매지점',
-        #             right_on='팀',
-        #             how='left'
-        #         )
-        # d_df = d_df.rename(columns={'본부': '판매본부', '실': '판매실'})
+        d_df = d_df.rename(columns={'본부': '매입본부', '실': '매입실', '팀_정정': '매입팀'})
+        d_df = d_df.drop(columns='팀', errors='ignore') # 병합 후 불필요한 키 컬럼 삭제
+        d_df.loc[d_df['매입유형1'] =='자산', ['매입팀']] = '자산'
+        d_df['매입담당'] = d_df['매입사원']
 
+        cond1 = d_df['매입실'] == '상품매입실'
+        cond2 = d_df['매입실'] == '옥션사업실'
+        cond3 = d_df['매입팀'].str.endswith('지점')
+        cond4 = d_df['매입팀'].str.endswith('파트')
 
+        d_df['매입구분'] = np.select(
+            [cond1, cond2, cond3, cond4],
+            ['상품매입실', '기타', '지점', '지점'],
+            default='기타'
+        )
+        
+        d_df = d_df.merge(
+                    hr_map_df[['팀', '본부', '실', '팀_정정']],
+                    left_on='판매지점',
+                    right_on='팀',
+                    how='left'
+                )
+        d_df = d_df.rename(columns={'본부': '판매본부2', '실': '판매실', '팀_정정': '판매팀'})
+        d_df = d_df.drop(columns='팀', errors='ignore') # 병합 후 불필요한 키 컬럼 삭제
 
+        cond1 = d_df['소/도매'] == '도매'
+        cond2 = d_df['판매방식'].isin(['기타/지점도매', '도매/도매', '도매/경매'])
+
+        d_df['판매담당'] = np.select(
+            [cond1, cond2],
+            [d_df['판매팀'], '#지점도매'],
+            default=d_df['판매사원']
+        )
 
         # 1. 삭제하고 싶은 후보 리스트
         cols_to_drop = ['고객타입', '사업자유형', '업태', '업종']

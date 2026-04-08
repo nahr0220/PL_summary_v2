@@ -105,9 +105,14 @@ def save_to_master(new_df, verify_file=None, file_name="master_pnl.xlsx"):
     for item in name_map.keys():
         new_df[f"{item}_검증"] = True
 
+    verify_error = None
     if verify_file is not None:
         try:
-            v_df = pd.read_excel(verify_file, sheet_name='검증')
+            xl = pd.ExcelFile(verify_file)
+            sheet_names = xl.sheet_names
+            # '검증'이라는 글자가 포함된 시트를 찾고, 없으면 맨 앞의 첫 번째 시트를 사용합니다.
+            target_sheet = next((s for s in sheet_names if '검증' in s), sheet_names[0])
+            v_df = pd.read_excel(verify_file, sheet_name=target_sheet)
             v_month_cols = {}
             for col in v_df.columns:
                 match = re.search(r'(\d{2,4})[-년\s]*(\d{1,2})[-월\s]*', str(col))
@@ -122,7 +127,7 @@ def save_to_master(new_df, verify_file=None, file_name="master_pnl.xlsx"):
                         actual_val = pd.to_numeric(v_row[v_col], errors='coerce').sum()
                         new_df.loc[new_df['판매월'] == m, f"{item}_검증"] = abs(calc_val - actual_val) < 100
         except Exception as e:
-            print(f"검증 스킵됨 (사유: {e})")
+            verify_error = str(e)
 
     if os.path.exists(file_name):
         old_df = pd.read_excel(file_name)
@@ -132,4 +137,4 @@ def save_to_master(new_df, verify_file=None, file_name="master_pnl.xlsx"):
         combined_df = new_df
 
     combined_df.to_excel(file_name, index=False)
-    return file_name
+    return file_name, verify_error

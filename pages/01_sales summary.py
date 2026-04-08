@@ -381,6 +381,11 @@ with tab2: # UPLOAD
 
             with col2:
                 if st.button("마스터 파일에 저장", width='stretch', type="primary"):
-                    fname = save_to_master(f_df, verify_file=v_file)
-                    st.success(f"✅ 저장 완료!")
-                    st.rerun()
+                    fname, v_err = save_to_master(f_df, verify_file=v_file)
+                    if v_err:
+                        st.warning(f"⚠️ 저장되었으나 검증은 스킵되었습니다.\n사유: {v_err}")
+                        if "xlrd" in v_err:
+                            st.info("Tip: 터미널에서 'pip install xlrd'를 실행해 주세요.")
+                    else:
+                        st.success(f"✅ 저장 및 검증 완료!")
+                    # st.rerun() # 메시지를 확인하기 위해 필요한 경우 주석 처리하거나 적절한 타이밍에 실행

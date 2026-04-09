@@ -52,12 +52,8 @@ def preprocess_sales_data(uploaded_files, base_df):
     merged_df["차량번호"] = merged_df["적요"].str.extract(f"({unit_pattern})")
 
     # 3️⃣ 상품ID Lookup
-    # 컬럼명 유연성 처리 (신차량번호 <-> 현차량번호, 구차량번호 <-> 전차량번호 대응)
-    new_col = next((c for c in ["신차량번호", "현차량번호"] if c in base_df.columns), "신차량번호")
-    old_col = next((c for c in ["구차량번호", "전차량번호"] if c in base_df.columns), "구차량번호")
-
-    new_map = base_df.dropna(subset=[new_col]).drop_duplicates(new_col).set_index(new_col)["상품ID"].to_dict()
-    old_map = base_df.dropna(subset=[old_col]).drop_duplicates(old_col).set_index(old_col)["상품ID"].to_dict()
+    new_map = base_df.dropna(subset=["현차량번호"]).drop_duplicates("현차량번호").set_index("현차량번호")["상품ID"].to_dict()
+    old_map = base_df.dropna(subset=["전차량번호"]).drop_duplicates("전차량번호").set_index("전차량번호")["상품ID"].to_dict()
 
     merged_df["상품ID"] = "확인필요"
     mask_blank = ((merged_df["계정명"] == "수입수수료(연회비)") | (merged_df["거래처"] == "결산거래처") | (merged_df["계정명"] == "수입수수료(상품화)"))

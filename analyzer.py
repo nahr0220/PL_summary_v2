@@ -119,8 +119,13 @@ def save_to_master(new_df, verify_file=None, file_name="master_pnl.xlsx"):
                 if match:
                     v_month_cols[int(match.group(2))] = col
 
+            # '계정명' 컬럼이 없는 경우에 대한 예외 처리
+            if '계정명' not in v_df.columns:
+                raise ValueError(f"시트('{target_sheet}')에서 '계정명' 컬럼을 찾을 수 없습니다.")
+
             for item, v_key in name_map.items():
-                v_row = v_df[v_df['계정명'].str.contains(v_key, na=False, case=False)]
+                # regex=False를 추가하여 괄호()를 특수문자가 아닌 일반 문자로 취급하도록 수정
+                v_row = v_df[v_df['계정명'].str.contains(v_key, na=False, case=False, regex=False)]
                 if not v_row.empty:
                     for m, v_col in v_month_cols.items():
                         calc_val = new_df[new_df['판매월'] == m][item].sum()

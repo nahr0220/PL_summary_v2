@@ -239,15 +239,19 @@ with tab1:  # VIEW (매출요약정보)
                 pivot_df.columns = pivot_df.columns.astype(str)
                 
                 def format_with_status(val, col_name, row_idx):
-                    if val == 0: return "-"
                     if "00. 총합계" not in row_idx[0] and "합계" in row_idx[1]:
                         item_raw = row_idx[0].split(". ")[1]
                         v_col = f"{item_raw}_검증"
                         m_df = master_df[master_df['판매월'] == int(col_name)]
                         if not m_df.empty and v_col in m_df.columns:
-                            icon = " ✅" if m_df[v_col].all() else " ❌"
+                            is_ok = m_df[v_col].all()
+                            icon = " ✅" if is_ok else " ❌"
+                            # 값이 0인데 검증이 실패한 경우(더존에는 값이 있는 경우) 0 ❌ 표시
+                            if val == 0:
+                                return f"0{icon}" if not is_ok else "-"
                             return f"{val:,.0f}{icon}"
-                    return f"{val:,.0f}"
+                    
+                    return "-" if val == 0 else f"{val:,.0f}"
 
                 def apply_row_style(s):
                     if "00. 총합계" in str(s.name[0]):

@@ -296,7 +296,7 @@ with tab1:  # VIEW (매출요약정보)
                 if uploaded_hr_file:
                     if st.button("💾 인사 데이터 교체", use_container_width=True, type="primary", key="btn_hr"):
                         new_hr_df = pd.read_excel(uploaded_hr_file)
-                        required_hr_cols = ["팀", "팀_정정", "실", "본부", "상태", "도/소매구분", "적용달"]
+                        required_hr_cols = ["팀", "팀_정정", "실", "본부", "상태", "도/소매", "적용달"]
                         if not all(col in new_hr_df.columns for col in required_hr_cols):
                             st.error(f"❌ 필수 컬럼이 없습니다: {', '.join(required_hr_cols)}")
                         else:

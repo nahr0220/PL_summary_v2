@@ -25,6 +25,7 @@ DETAIL_COLUMNS = [
     "분류3",
     "분류4",
 ]
+OUTPUT_DETAIL_COLUMNS = [*DETAIL_COLUMNS, "매입연도", "매입월"]
 
 
 def _strip_columns(df):
@@ -260,7 +261,7 @@ def collect_product_ids(dfs):
                 "타처입고",
                 "구분1",
                 "구분2",
-                *DETAIL_COLUMNS,
+                *OUTPUT_DETAIL_COLUMNS,
             ]
         )
 
@@ -283,9 +284,13 @@ def collect_product_ids(dfs):
     merged["구분1"] = merged["구분2"].eq("사내매출").map({True: "당사차량", False: "타사차량"})
 
     merged = _append_vehicle_details(merged, dfs)
+    parsed_purchase_date = pd.to_datetime(merged["매입일자"], format="mixed", errors="coerce")
+    internal_sales = merged["구분2"].eq("사내매출")
+    merged["매입연도"] = parsed_purchase_date.dt.year.astype("Int64").where(internal_sales, pd.NA)
+    merged["매입월"] = parsed_purchase_date.dt.month.astype("Int64").where(internal_sales, pd.NA)
     merged = merged.drop(columns=["_출처", "_입고구분"])
     merged = merged[
-        ["상품ID", "기초재고", "정상입고", "타처입고", "구분1", "구분2", *DETAIL_COLUMNS]
+        ["상품ID", "기초재고", "정상입고", "타처입고", "구분1", "구분2", *OUTPUT_DETAIL_COLUMNS]
     ]
     merged = merged.sort_values("상품ID").reset_index(drop=True)
     return merged
@@ -608,7 +613,7 @@ def preprocess_waste_resource_file(file, product_ledger_df=None):
 
         if "매입일자" in df.columns:
             parsed_purchase_date = pd.to_datetime(
-                df["매입일자"], format="mixed", errors="coerce"
+                df["매입일자"], errors="coerce"
             )
             df["회계월"] = parsed_purchase_date.dt.month.astype("Int64")
         else:
@@ -652,6 +657,7 @@ def preprocess_payback_file(file, detail_df=None):
         elif "상품ID" not in df.columns:
             df["상품ID"] = ""
 
+        df["연도월"] = 2026
         processed_sheets[sheet_name] = df
 
     return processed_sheets
@@ -712,7 +718,15 @@ with tab2:
         "위탁조회": None,
     }
     product_id_df = pd.DataFrame(
-        columns=["상품ID", "기초재고", "정상입고", "타처입고", "구분1", "구분2", *DETAIL_COLUMNS]
+        columns=[
+            "상품ID",
+            "기초재고",
+            "정상입고",
+            "타처입고",
+            "구분1",
+            "구분2",
+            *OUTPUT_DETAIL_COLUMNS,
+        ]
     )
 
     if uploaded_files:
@@ -757,9 +771,7 @@ with tab2:
         product_id_df = collect_product_ids(dfs)
 
         if not product_id_df.empty:
-            unique_product_id_df = product_id_df[["상품ID"]].copy()
-            st.write(f"상품ID 개수: {len(unique_product_id_df):,}건")
-            st.dataframe(unique_product_id_df, use_container_width=True)
+            st.write(f"통합 데이터 건수: {len(product_id_df):,}건")
 
             with st.expander("구분 포함 상세 보기"):
                 st.download_button(
@@ -789,9 +801,10 @@ with tab2:
 
     st.divider()
     st.header("2️⃣ 원가")
+    st.subheader("2-1. 매입원가")
 
     uploaded_cost_files = st.file_uploader(
-        "원가 파일 3개를 업로드하세요.",
+        "매입원가 파일을 업로드하세요.",
         type=["xlsx", "xls"],
         accept_multiple_files=True,
         key="cost_files",
@@ -855,9 +868,9 @@ with tab2:
 
         if cost_sheet_dfs:
             st.download_button(
-                "원가 전처리 파일 다운로드",
+                "매입원가 전처리 파일 다운로드",
                 data=workbook_to_excel_bytes(cost_sheet_dfs),
-                file_name="cost_preprocessed.xlsx",
+                file_name="purchase_cost_preprocessed.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
@@ -868,7 +881,49 @@ with tab2:
                     st.write(f"건수: {len(current_df):,}건")
                     st.dataframe(current_df, use_container_width=True)
         else:
-            st.info("원가 파일에서 표시할 데이터가 없습니다.")
+            st.info("매입원가 파일에서 표시할 데이터가 없습니다.")
+
+    st.divider()
+    st.subheader("2-2. 제조원가")
+
+    uploaded_manufacturing_cost_files = st.file_uploader(
+        "제조원가 파일을 업로드하세요.",
+        type=["xlsx", "xls"],
+        accept_multiple_files=True,
+        key="manufacturing_cost_files",
+    )
+
+    manufacturing_cost_sheet_dfs = {}
+
+    if uploaded_manufacturing_cost_files:
+        for file in uploaded_manufacturing_cost_files:
+            try:
+                file_label = file.name.rsplit(".", 1)[0]
+                file_sheets = preprocess_cost_file(file)
+
+                for sheet_name, df in file_sheets.items():
+                    output_sheet_name = f"{file_label}_{sheet_name}"
+                    manufacturing_cost_sheet_dfs[output_sheet_name] = df
+
+            except Exception as exc:
+                st.error(f"{file.name} 처리 중 오류: {exc}")
+
+        if manufacturing_cost_sheet_dfs:
+            st.download_button(
+                "제조원가 전처리 파일 다운로드",
+                data=workbook_to_excel_bytes(manufacturing_cost_sheet_dfs),
+                file_name="manufacturing_cost_preprocessed.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            manufacturing_cost_tabs = st.tabs(list(manufacturing_cost_sheet_dfs.keys()))
+            for i, sheet_name in enumerate(manufacturing_cost_sheet_dfs.keys()):
+                with manufacturing_cost_tabs[i]:
+                    current_df = manufacturing_cost_sheet_dfs[sheet_name]
+                    st.write(f"건수: {len(current_df):,}건")
+                    st.dataframe(current_df, use_container_width=True)
+        else:
+            st.info("제조원가 파일에서 표시할 데이터가 없습니다.")
 
     st.divider()
     st.header("3️⃣ 원가동인")

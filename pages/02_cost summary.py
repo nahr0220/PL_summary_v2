@@ -43,7 +43,7 @@ def preprocess_purchase_inquiry(file):
     if "회계월" not in df.columns:
         if "계산서일자" in df.columns:
             parsed_month = pd.to_datetime(
-                df["계산서일자"], format="mixed", errors="coerce"
+                df["계산서일자"], errors="coerce"
             ).dt.month
 
             if parsed_month.isna().all():
@@ -185,7 +185,7 @@ def _build_detail_frame(df, date_column):
 def _append_vehicle_details(merged, dfs):
     purchase_detail = _build_detail_frame(dfs.get("매입조회"), "계산서일자")
     consignment_detail = _build_detail_frame(dfs.get("위탁조회"), "위탁등록일자")
-    inventory_detail = _build_detail_frame(dfs.get("기초재고"), "위탁등록일자")
+    inventory_detail = _build_detail_frame(dfs.get("기초재고"), "계산서일자")
 
     purchase_detail = purchase_detail.rename(
         columns={column: f"매입_{column}" for column in DETAIL_COLUMNS}

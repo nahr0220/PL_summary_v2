@@ -838,7 +838,7 @@ def render_settlement_selector():
     if "settlement_month" not in st.session_state:
         st.session_state["settlement_month"] = pd.Timestamp.today().month
 
-    year_col, month_col, button_col = st.columns([1, 1, 1])
+    year_col, month_col, spacer_col, button_col = st.columns([1, 1, 1, 0.6])
 
     with year_col:
         selected_year = st.number_input(
@@ -861,16 +861,20 @@ def render_settlement_selector():
 
     with button_col:
         st.write("")
-        apply_period = st.button("결산연도/월 적용", key="apply_settlement_period")
+        apply_period = st.button(
+            "결산연/월 적용",
+            key="apply_settlement_period",
+            use_container_width=True,
+        )
 
     if apply_period:
         st.session_state["settlement_year"] = int(selected_year)
         st.session_state["settlement_month"] = selected_month
-        st.success(f"결산연도/월이 {int(selected_year)}년 {selected_month}월로 지정되었습니다.")
+        st.success(f"결산연/월이 {int(selected_year)}년 {selected_month}월로 지정되었습니다.")
 
     settlement_year = st.session_state["settlement_year"]
     settlement_month = st.session_state["settlement_month"]
-    st.caption(f"현재 결산연도/월: {settlement_year}년 {settlement_month}월")
+    st.caption(f"현재 결산연/월: {settlement_year}년 {settlement_month}월")
     st.divider()
 
     return settlement_year, settlement_month
@@ -926,6 +930,18 @@ def render_dataframe_tabs(sheet_dfs):
             current_df = sheet_dfs[sheet_name]
             st.write(f"건수: {len(current_df):,}건")
             st.dataframe(current_df, width='stretch')
+
+
+def _unique_sheet_label(sheet_dfs, label):
+    label = str(label).strip() or "Sheet"
+    unique_label = label
+    index = 2
+
+    while unique_label in sheet_dfs:
+        unique_label = f"{label}_{index}"
+        index += 1
+
+    return unique_label
 
 
 def render_base_upload(settlement_month):
@@ -996,7 +1012,6 @@ def preprocess_purchase_cost_files(
             continue
 
         try:
-            file_label = file.name.rsplit(".", 1)[0]
             product_ledger_df = preprocess_product_ledger(
                 file,
                 product_id_df,
@@ -1004,7 +1019,7 @@ def preprocess_purchase_cost_files(
                 settlement_year,
                 settlement_month,
             )
-            cost_sheet_dfs[file_label] = product_ledger_df
+            cost_sheet_dfs[_unique_sheet_label(cost_sheet_dfs, "상품원장")] = product_ledger_df
             product_ledger_frames.append(product_ledger_df)
         except Exception as exc:
             st.error(f"{file.name} 처리 중 오류: {exc}")
@@ -1026,6 +1041,7 @@ def preprocess_purchase_cost_files(
                 if product_ledger_lookup_df.empty:
                     st.warning("폐자원 파일의 상품ID를 가져오려면 상품원장 파일도 함께 업로드하세요.")
                 file_sheets = preprocess_waste_resource_file(file, product_ledger_lookup_df)
+                display_label = "폐자원공제"
             elif "페이백" in file.name:
                 if product_id_df.empty:
                     st.warning("페이백 파일의 상품ID를 가져오려면 1번 기초 DB 파일도 함께 업로드하세요.")
@@ -1035,11 +1051,14 @@ def preprocess_purchase_cost_files(
                     settlement_year,
                     settlement_month,
                 )
+                display_label = "페이백"
             else:
                 file_sheets = preprocess_cost_file(file)
+                display_label = None
 
             for sheet_name, df in file_sheets.items():
-                cost_sheet_dfs[f"{file_label}_{sheet_name}"] = df
+                output_sheet_name = display_label or f"{file_label}_{sheet_name}"
+                cost_sheet_dfs[_unique_sheet_label(cost_sheet_dfs, output_sheet_name)] = df
         except Exception as exc:
             st.error(f"{file.name} 처리 중 오류: {exc}")
 

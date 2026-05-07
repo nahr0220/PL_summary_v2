@@ -74,7 +74,7 @@ def build_final_report(base_df, merged_df):
     final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(낙찰수수료)", "낙찰")
     final_df['매도/낙찰'] = final_df['매도'] + final_df['낙찰']
 
-    finance_mask = final_df["상품/위탁"] == "상품"
+    finance_mask = (final_df["상품/위탁"] == "상품") & (final_df["소/도매"] == "소매")
     final_df = distribute_indirect_cost(final_df, merged_df, "수입수수료(금융수수료)", "금융수수료", target_mask=finance_mask, use_month_match=False)
     
     final_df['기타'] = 0 

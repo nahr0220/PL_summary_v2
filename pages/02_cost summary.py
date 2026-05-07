@@ -23,9 +23,41 @@ DETAIL_COLUMNS = [
     "분류1",
     "분류2",
     "분류3",
-    "분류4",
+    "채널",
 ]
 OUTPUT_DETAIL_COLUMNS = [*DETAIL_COLUMNS, "매입연도", "매입월"]
+PRODUCT_ID_SOURCE_KEYS = [
+    "매입조회",
+    "검사매출",
+    "정비매출",
+    "기초재고",
+    "전체상품조회",
+    "위탁수불부_기초",
+    "위탁수불부_입고",
+]
+PRODUCT_ID_COLUMNS = [
+    "상품ID",
+    "기초재고",
+    "정상입고",
+    "타처입고",
+    "구분1",
+    "구분2",
+    "선매입여부",
+    *OUTPUT_DETAIL_COLUMNS,
+]
+BASE_DF_KEYS = [
+    "매입조회",
+    "검사매출",
+    "정비매출",
+    "기초재고",
+    "기초재고_전체",
+    "전체상품조회",
+    "위탁수불부",
+    "위탁수불부_전체",
+    "위탁수불부_기초",
+    "위탁수불부_입고",
+]
+HIDDEN_BASE_DF_KEYS = ["기초재고_전체", "위탁수불부_전체"]
 
 
 def _strip_columns(df):
@@ -34,8 +66,9 @@ def _strip_columns(df):
     return df
 
 
+# 매입조회
 def preprocess_purchase_inquiry(file):
-    df = _strip_columns(pd.read_excel(file, header=1))
+    df = _strip_columns(pd.read_excel(file))
 
     if "상품ID" not in df.columns and "차량아이디" in df.columns:
         df["상품ID"] = df["차량아이디"]
@@ -43,7 +76,7 @@ def preprocess_purchase_inquiry(file):
     if "회계월" not in df.columns:
         if "계산서일자" in df.columns:
             parsed_month = pd.to_datetime(
-                df["계산서일자"], errors="coerce"
+                df["계산서일자"], format="mixed", errors="coerce"
             ).dt.month
 
             if parsed_month.isna().all():
@@ -58,17 +91,54 @@ def preprocess_purchase_inquiry(file):
     return df
 
 
-def preprocess_consignment(file):
-    df = _strip_columns(pd.read_excel(file))
-    df = df[~df["거래처명"].isin(["오토플러스서비스(주)", "테슬라코리아유한회사"])].copy()
+def _ensure_product_id(df):
+    df = df.copy()
+    if "상품ID" not in df.columns and "차량아이디" in df.columns:
+        df["상품ID"] = df["차량아이디"]
+    if "상품ID" not in df.columns and "CODE" in df.columns:
+        df["상품ID"] = df["CODE"]
     return df
 
 
+def _is_flag_one(series):
+    numeric_values = pd.to_numeric(series, errors="coerce")
+    text_values = series.astype(str).str.strip()
+    return numeric_values.eq(1) | text_values.eq("1")
+
+
+# 전체상품조회
+def preprocess_product_master(file):
+    df = _strip_columns(pd.read_excel(file))
+    df = _ensure_product_id(df)
+    return df
+
+
+# 위탁수불부
+def preprocess_consignment_ledger(file, settlement_month):
+    df = _strip_columns(pd.read_excel(file))
+    df = _ensure_product_id(df)
+
+    opening_column = f"{settlement_month}월기초_제외"
+    inbound_column = f"{settlement_month}월입고_제외"
+
+    if opening_column not in df.columns:
+        raise KeyError(f"위탁수불부 파일에 '{opening_column}' 컬럼이 없습니다.")
+    if inbound_column not in df.columns:
+        raise KeyError(f"위탁수불부 파일에 '{inbound_column}' 컬럼이 없습니다.")
+
+    opening_df = df[_is_flag_one(df[opening_column])].copy()
+    inbound_df = df[_is_flag_one(df[inbound_column])].copy()
+
+    return df, opening_df, inbound_df
+
+
+# 검사/정비매출
 def preprocess_sales(file):
     df = _strip_columns(pd.read_excel(file))
+    df = _ensure_product_id(df)
 
-    if "상품ID" not in df.columns and "차량아이디" in df.columns:
-        df["상품ID"] = df["차량아이디"]
+    if "세부내역" in df.columns:
+        df = df[~df["세부내역"].astype(str).str.contains("보증수리", na=False)].copy()
 
     if "상품ID" in df.columns:
         df = df.drop_duplicates(subset=["상품ID"]).copy()
@@ -76,10 +146,10 @@ def preprocess_sales(file):
     return df
 
 
+# 기초재고
 def preprocess_opening_inventory(file, base_df):
     df = _strip_columns(pd.read_excel(file))
-    if "상품ID" not in df.columns and "CODE" in df.columns:
-        df["상품ID"] = df["CODE"]
+    df = _ensure_product_id(df)
 
     if base_df is None or base_df.empty:
         raise ValueError("기초재고 처리 전에 매입조회 파일이 먼저 정상 로드되어야 합니다.")
@@ -128,24 +198,6 @@ def filter_purchase_inquiry(df_purchase, df_inventory_all):
     return df_purchase
 
 
-def _build_flag_frame(df, flag_name, condition=None):
-    if df is None or df.empty or "상품ID" not in df.columns:
-        return pd.DataFrame(columns=["상품ID", flag_name])
-
-    temp = df.copy()
-    temp["상품ID"] = temp["상품ID"].astype(str).str.strip()
-    temp = temp[temp["상품ID"] != ""].copy()
-
-    if condition is None:
-        temp = temp[["상품ID"]].drop_duplicates().copy()
-        temp[flag_name] = 1
-        return temp
-
-    filtered = temp.loc[condition(temp), ["상품ID"]].drop_duplicates().copy()
-    filtered[flag_name] = 1
-    return filtered
-
-
 def _get_first_existing_column(df, candidates):
     for column in candidates:
         if column in df.columns:
@@ -168,65 +220,88 @@ def _build_detail_frame(df, date_column):
 
     detail = pd.DataFrame({"상품ID": temp["상품ID"]})
     detail["신번호"] = _get_first_existing_column(temp, ["차량번호", "신번호"])
-    detail["구번호"] = _get_first_existing_column(temp, ["이전차량번호", "구번호"])
+    detail["구번호"] = _get_first_existing_column(temp, ["이전차량번호", "구번호", "이전차량번호1"])
     detail["차대번호"] = _get_first_existing_column(temp, ["차대번호"])
     detail["차종"] = _get_first_existing_column(temp, ["차종"])
     detail["차명"] = _get_first_existing_column(temp, ["차명", "차량명"])
     detail["반납일자"] = _get_first_existing_column(temp, ["반납일자"])
-    detail["매입일자"] = _get_first_existing_column(temp, [date_column])
-    detail["분류1"] = _get_first_existing_column(temp, ["매입유형-분류1"])
-    detail["분류2"] = _get_first_existing_column(temp, ["매입유형-분류2"])
-    detail["분류3"] = _get_first_existing_column(temp, ["매입유형-분류3"])
-    detail["분류4"] = _get_first_existing_column(temp, ["매입유형-분류4"])
+    detail["매입일자"] = (
+        "" if date_column is None else _get_first_existing_column(temp, [date_column])
+    )
+    detail["분류1"] = _get_first_existing_column(temp, ["신매입유형1", "매입유형-분류1"])
+    detail["분류2"] = _get_first_existing_column(temp, ["신매입유형2", "매입유형-분류2"])
+    detail["분류3"] = _get_first_existing_column(temp, ["신매입유형3", "매입유형-분류3"])
+    detail["채널"] = _get_first_existing_column(temp, ["채널", "매입채널", "매입유형-분류4"])
 
     return detail.drop_duplicates(subset=["상품ID"], keep="first").reset_index(drop=True)
 
 
 def _append_vehicle_details(merged, dfs):
     purchase_detail = _build_detail_frame(dfs.get("매입조회"), "계산서일자")
-    consignment_detail = _build_detail_frame(dfs.get("위탁조회"), "위탁등록일자")
     inventory_detail = _build_detail_frame(dfs.get("기초재고"), "계산서일자")
+    product_master_detail = _build_detail_frame(dfs.get("전체상품조회"), "매입세금계산서일자")
+    consignment_ledger_detail = _build_detail_frame(dfs.get("위탁수불부_전체"), None)
 
     purchase_detail = purchase_detail.rename(
         columns={column: f"매입_{column}" for column in DETAIL_COLUMNS}
     )
-    consignment_detail = consignment_detail.rename(
-        columns={column: f"위탁_{column}" for column in DETAIL_COLUMNS}
-    )
     inventory_detail = inventory_detail.rename(
         columns={column: f"기초_{column}" for column in DETAIL_COLUMNS}
     )
+    product_master_detail = product_master_detail.rename(
+        columns={column: f"전체_{column}" for column in DETAIL_COLUMNS}
+    )
+    consignment_ledger_detail = consignment_ledger_detail.rename(
+        columns={column: f"위탁수불_{column}" for column in DETAIL_COLUMNS}
+    )
 
     merged = merged.merge(purchase_detail, on="상품ID", how="left")
-    merged = merged.merge(consignment_detail, on="상품ID", how="left")
     merged = merged.merge(inventory_detail, on="상품ID", how="left")
+    merged = merged.merge(product_master_detail, on="상품ID", how="left")
+    merged = merged.merge(consignment_ledger_detail, on="상품ID", how="left")
 
-    use_inventory = merged["기초재고"].eq(1)
-    use_consignment = merged["구분2"].eq("위탁매출")
+    use_inventory = merged["_출처"].eq("기초재고")
     no_detail_sales = merged["구분2"].isin(["검사매출", "정비매출"])
     helper_columns = []
 
     for column in DETAIL_COLUMNS:
         purchase_column = f"매입_{column}"
-        consignment_column = f"위탁_{column}"
         inventory_column = f"기초_{column}"
-        helper_columns.extend([purchase_column, consignment_column, inventory_column])
+        product_master_column = f"전체_{column}"
+        consignment_ledger_column = f"위탁수불_{column}"
+        helper_columns.extend(
+            [
+                purchase_column,
+                inventory_column,
+                product_master_column,
+                consignment_ledger_column,
+            ]
+        )
 
         purchase_values = merged[purchase_column].replace("", pd.NA)
-        consignment_values = merged[consignment_column].replace("", pd.NA)
         inventory_values = merged[inventory_column].replace("", pd.NA)
+        product_master_values = merged[product_master_column].replace("", pd.NA)
+        consignment_ledger_values = merged[consignment_ledger_column].replace("", pd.NA)
 
         default_result = purchase_values.combine_first(inventory_values).combine_first(
-            consignment_values
-        )
-        consignment_result = consignment_values.combine_first(purchase_values).combine_first(
-            inventory_values
-        )
-        inventory_result = inventory_values.combine_first(purchase_values).combine_first(
-            consignment_values
-        )
+            product_master_values
+        ).combine_first(consignment_ledger_values)
+        inventory_result = inventory_values.combine_first(consignment_ledger_values).combine_first(
+            product_master_values
+        ).combine_first(purchase_values)
+        product_master_result = product_master_values.combine_first(purchase_values).combine_first(
+            consignment_ledger_values
+        ).combine_first(inventory_values)
+        consignment_ledger_result = consignment_ledger_values.combine_first(
+            product_master_values
+        ).combine_first(purchase_values).combine_first(inventory_values)
 
-        result = default_result.where(~use_consignment, consignment_result)
+        result = default_result
+        result = result.where(~merged["_출처"].eq("전체상품조회"), product_master_result)
+        result = result.where(
+            ~merged["_출처"].isin(["위탁수불부_기초", "위탁수불부_입고"]),
+            consignment_ledger_result,
+        )
         result = result.where(~use_inventory, inventory_result)
         result = result.where(~no_detail_sales, "")
         merged[column] = result.fillna("")
@@ -237,7 +312,7 @@ def _append_vehicle_details(merged, dfs):
 def collect_product_ids(dfs):
     base_ids = []
 
-    for key in ["매입조회", "검사매출", "정비매출", "기초재고", "위탁조회"]:
+    for key in PRODUCT_ID_SOURCE_KEYS:
         df = dfs.get(key)
         if df is None or df.empty or "상품ID" not in df.columns:
             continue
@@ -253,32 +328,29 @@ def collect_product_ids(dfs):
         base_ids.append(temp)
 
     if not base_ids:
-        return pd.DataFrame(
-            columns=[
-                "상품ID",
-                "기초재고",
-                "정상입고",
-                "타처입고",
-                "구분1",
-                "구분2",
-                *OUTPUT_DETAIL_COLUMNS,
-            ]
-        )
+        return pd.DataFrame(columns=PRODUCT_ID_COLUMNS)
 
     merged = pd.concat(base_ids, ignore_index=True).reset_index(drop=True)
 
     for column in ["기초재고", "정상입고", "타처입고"]:
         merged[column] = 0
+    merged["선매입여부"] = ""
 
     purchase_rows = merged["_출처"].eq("매입조회")
     merged.loc[merged["_출처"].eq("기초재고"), "기초재고"] = 1
+    merged.loc[merged["_출처"].eq("위탁수불부_기초"), "기초재고"] = 1
     merged.loc[purchase_rows & merged["_입고구분"].eq("정상입고"), "정상입고"] = 1
     merged.loc[purchase_rows & merged["_입고구분"].eq("타처입고"), "타처입고"] = 1
+    merged.loc[merged["_출처"].eq("전체상품조회"), "정상입고"] = 1
+    merged.loc[merged["_출처"].eq("전체상품조회"), "선매입여부"] = "선매입"
+    merged.loc[merged["_출처"].eq("위탁수불부_입고"), "정상입고"] = 1
 
     merged["구분2"] = ""
     internal_sales = merged[["기초재고", "정상입고", "타처입고"]].eq(1).any(axis=1)
     merged.loc[internal_sales, "구분2"] = "사내매출"
-    merged.loc[merged["_출처"].eq("위탁조회"), "구분2"] = "위탁매출"
+    merged.loc[
+        merged["_출처"].isin(["위탁수불부_기초", "위탁수불부_입고"]), "구분2"
+    ] = "위탁매출"
     merged.loc[merged["_출처"].eq("검사매출"), "구분2"] = "검사매출"
     merged.loc[merged["_출처"].eq("정비매출"), "구분2"] = "정비매출"
     merged["구분1"] = merged["구분2"].eq("사내매출").map({True: "당사차량", False: "타사차량"})
@@ -290,7 +362,16 @@ def collect_product_ids(dfs):
     merged["매입월"] = parsed_purchase_date.dt.month.astype("Int64").where(internal_sales, pd.NA)
     merged = merged.drop(columns=["_출처", "_입고구분"])
     merged = merged[
-        ["상품ID", "기초재고", "정상입고", "타처입고", "구분1", "구분2", *OUTPUT_DETAIL_COLUMNS]
+        [
+            "상품ID",
+            "기초재고",
+            "정상입고",
+            "타처입고",
+            "구분1",
+            "구분2",
+            "선매입여부",
+            *OUTPUT_DETAIL_COLUMNS,
+        ]
     ]
     merged = merged.sort_values("상품ID").reset_index(drop=True)
     return merged
@@ -393,10 +474,10 @@ def extract_car_number(row):
     elif text.endswith("지게차"):
         return "지게차"
     elif cost_type in ["페이백(반납)", "페이백(미반납)", "폐자원공제"]:
-        return ""
+        return "확인필요"
     else:
         match = re.search(r"\d{2,3}[^\d]\d{4}", text)
-        return match.group() if match else "확인필요"
+        return match.group() if match else ""
 
 
 def _normalize_lookup_value(value):
@@ -489,12 +570,9 @@ def _append_product_ledger_purchase_columns(df, detail_df, inventory_all_df=None
         status = str(row["상태"]).strip() if pd.notna(row["상태"]) else ""
         car_number = str(row["차량번호"]).strip() if pd.notna(row["차량번호"]) else ""
 
-        if status in ["취소", "결산"]:
-            product_id = status
-        elif car_number == "지게차":
-            product_id = status
-        elif car_number == "확인필요":
-            product_id = "확인필요"
+        if car_number == "지게차":
+            summary_text = str(row["적요"]) if pd.notna(row["적요"]) else ""
+            product_id = summary_text[:12]
         else:
             if car_number not in product_id_cache:
                 product_id_cache[car_number] = _lookup_product_id_by_car_number(
@@ -511,18 +589,8 @@ def _append_product_ledger_purchase_columns(df, detail_df, inventory_all_df=None
     purchase_types = []
 
     for _, row in df.iterrows():
-        status = str(row["상태"]).strip() if pd.notna(row["상태"]) else ""
-        car_number = str(row["차량번호"]).strip() if pd.notna(row["차량번호"]) else ""
         product_id = str(row["상품ID"]).strip() if pd.notna(row["상품ID"]) else ""
-
-        if status in ["취소", "결산"]:
-            purchase_type = status
-        elif car_number == "지게차":
-            purchase_type = status
-        elif car_number == "확인필요":
-            purchase_type = "확인필요"
-        else:
-            purchase_type = product_type_by_id.get(_normalize_lookup_value(product_id), "")
+        purchase_type = product_type_by_id.get(_normalize_lookup_value(product_id), "")
 
         purchase_types.append(purchase_type)
 
@@ -530,16 +598,33 @@ def _append_product_ledger_purchase_columns(df, detail_df, inventory_all_df=None
     return df
 
 
-def preprocess_product_ledger(file, detail_df=None, inventory_all_df=None):
+# 상품원장
+def preprocess_product_ledger(
+    file,
+    detail_df=None,
+    inventory_all_df=None,
+    settlement_year=None,
+    settlement_month=None,
+):
     file.seek(0)
     df = _strip_columns(pd.read_excel(file))
     df = df[~df["회계일자"].isin(["월계", "누계", "전일이월"])].copy()
+
+    if "작성사원명" in df.columns:
+        df = df[df["작성사원명"].astype(str).str.strip() != "김겸윤"].copy()
+
     df["회계일자"] = pd.to_datetime(df["회계일자"], format="mixed", errors="coerce")
     df = df[df["회계일자"].notna()].copy()
 
     df["회계연도"] = df["회계일자"].dt.year
     df["회계월"] = df["회계일자"].dt.month
     df["회계일자"] = df["회계일자"].dt.date
+
+    if settlement_year is not None and settlement_month is not None:
+        df = df[
+            (df["회계연도"] == int(settlement_year))
+            & (df["회계월"] == int(settlement_month))
+        ].copy()
 
     df["참고"] = df["적요"].apply(extract_reference)
     df["원가구분"] = df.apply(classify_cost, axis=1)
@@ -591,6 +676,7 @@ def _build_product_ledger_lookup(product_ledger_df):
     return dict(zip(ledger["_차량번호_lookup"], ledger["상품ID"]))
 
 
+# 폐자원
 def preprocess_waste_resource_file(file, product_ledger_df=None):
     file.seek(0)
     sheets = pd.read_excel(file, sheet_name=None)
@@ -602,7 +688,7 @@ def preprocess_waste_resource_file(file, product_ledger_df=None):
         df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
 
         if "구분" in df.columns:
-            df = df[df["구분"].astype(str).str.strip() == "영수증"].copy()
+            df = df[df["구분"].astype(str).str.strip().isin(["영수증", "계산서"])].copy()
 
         if "차량번호" in df.columns:
             df["상품ID"] = df["차량번호"].apply(
@@ -611,29 +697,76 @@ def preprocess_waste_resource_file(file, product_ledger_df=None):
         else:
             df["상품ID"] = ""
 
+        if "매입세액공제액" in df.columns:
+            tax_credit = pd.to_numeric(df["매입세액공제액"], errors="coerce").fillna(0)
+            df["제외대상"] = np.where(tax_credit < 0, 1, 0)
+        else:
+            df["제외대상"] = 0
+
         if "매입일자" in df.columns:
             parsed_purchase_date = pd.to_datetime(
-                df["매입일자"], errors="coerce"
+                df["매입일자"], format="mixed", errors="coerce"
             )
+            df["회계연도"] = parsed_purchase_date.dt.year.astype("Int64")
             df["회계월"] = parsed_purchase_date.dt.month.astype("Int64")
         else:
+            df["회계연도"] = pd.NA
             df["회계월"] = pd.NA
+
+        ordered_columns = [
+            column
+            for column in ["제외대상", "회계연도", "회계월"]
+            if column in df.columns
+        ]
+        remaining_columns = [column for column in df.columns if column not in ordered_columns]
+        df = df[remaining_columns[:1] + ordered_columns + remaining_columns[1:]]
 
         processed_sheets[sheet_name] = df
 
     return processed_sheets
 
 
-def preprocess_payback_file(file, detail_df=None):
+# 페이백
+def _parse_year_month(value):
+    if pd.isna(value):
+        return pd.NA, pd.NA
+
+    text = str(value).strip()
+    match = re.search(r"(\d{4})\D?(\d{1,2})", text)
+    if not match:
+        return pd.NA, pd.NA
+
+    return int(match.group(1)), int(match.group(2))
+
+
+def preprocess_payback_file(
+    file,
+    detail_df=None,
+    settlement_year=None,
+    settlement_month=None,
+):
     file.seek(0)
     sheets = pd.read_excel(file, sheet_name=None)
     detail_lookup = _build_detail_lookup(detail_df)
-    detail_lookup["secondary_vehicle_rows"] = []
     processed_sheets = {}
 
     for sheet_name, df in sheets.items():
         df = _strip_columns(df)
         df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+
+        if "연도월" in df.columns:
+            parsed_period = df["연도월"].apply(_parse_year_month)
+            df["연도"] = parsed_period.apply(lambda value: value[0]).astype("Int64")
+            df["월"] = parsed_period.apply(lambda value: value[1]).astype("Int64")
+
+            if settlement_year is not None and settlement_month is not None:
+                df = df[
+                    (df["연도"] == int(settlement_year))
+                    & (df["월"] == int(settlement_month))
+                ].copy()
+        elif settlement_year is not None and settlement_month is not None:
+            df = df.iloc[0:0].copy()
+
         original_product_ids = (
             df["상품ID"].copy()
             if "상품ID" in df.columns
@@ -657,7 +790,6 @@ def preprocess_payback_file(file, detail_df=None):
         elif "상품ID" not in df.columns:
             df["상품ID"] = ""
 
-        df["연도월"] = 2026
         processed_sheets[sheet_name] = df
 
     return processed_sheets
@@ -696,11 +828,107 @@ def workbook_to_excel_bytes(sheet_dfs):
     return output.getvalue()
 
 
-with tab1:
-    st.write("준비 중")
+def empty_product_id_df():
+    return pd.DataFrame(columns=PRODUCT_ID_COLUMNS)
 
 
-with tab2:
+def render_settlement_selector():
+    if "settlement_year" not in st.session_state:
+        st.session_state["settlement_year"] = pd.Timestamp.today().year
+    if "settlement_month" not in st.session_state:
+        st.session_state["settlement_month"] = pd.Timestamp.today().month
+
+    year_col, month_col, button_col = st.columns([1, 1, 1])
+
+    with year_col:
+        selected_year = st.number_input(
+            "결산연도",
+            min_value=2000,
+            max_value=2100,
+            value=int(st.session_state["settlement_year"]),
+            step=1,
+            key="selected_settlement_year",
+        )
+
+    with month_col:
+        selected_month = st.selectbox(
+            "결산월",
+            options=list(range(1, 13)),
+            index=st.session_state["settlement_month"] - 1,
+            format_func=lambda month: f"{month}월",
+            key="selected_settlement_month",
+        )
+
+    with button_col:
+        st.write("")
+        apply_period = st.button("결산연도/월 적용", key="apply_settlement_period")
+
+    if apply_period:
+        st.session_state["settlement_year"] = int(selected_year)
+        st.session_state["settlement_month"] = selected_month
+        st.success(f"결산연도/월이 {int(selected_year)}년 {selected_month}월로 지정되었습니다.")
+
+    settlement_year = st.session_state["settlement_year"]
+    settlement_month = st.session_state["settlement_month"]
+    st.caption(f"현재 결산연도/월: {settlement_year}년 {settlement_month}월")
+    st.divider()
+
+    return settlement_year, settlement_month
+
+
+def initialize_base_dfs():
+    return {key: None for key in BASE_DF_KEYS}
+
+
+def process_base_file(fname, file, dfs, settlement_month):
+    if "매입조회" in fname:
+        dfs["매입조회"] = preprocess_purchase_inquiry(file)
+    elif "전체상품조회" in fname:
+        dfs["전체상품조회"] = preprocess_product_master(file)
+    elif "위탁수불부" in fname:
+        (
+            consignment_ledger_all,
+            consignment_ledger_opening,
+            consignment_ledger_inbound,
+        ) = preprocess_consignment_ledger(file, settlement_month)
+        dfs["위탁수불부"] = consignment_ledger_all
+        dfs["위탁수불부_전체"] = consignment_ledger_all
+        dfs["위탁수불부_기초"] = consignment_ledger_opening
+        dfs["위탁수불부_입고"] = consignment_ledger_inbound
+    elif "검사매출" in fname:
+        dfs["검사매출"] = preprocess_sales(file)
+    elif "정비매출" in fname:
+        dfs["정비매출"] = preprocess_sales(file)
+
+
+def process_opening_inventory_files(file_map, dfs):
+    for fname, file in file_map.items():
+        if "기초재고" not in fname:
+            continue
+
+        try:
+            inventory_all, inventory_filtered = preprocess_opening_inventory(
+                file, dfs["매입조회"]
+            )
+            dfs["기초재고_전체"] = inventory_all
+            dfs["기초재고"] = inventory_filtered
+            dfs["매입조회"] = filter_purchase_inquiry(
+                dfs["매입조회"], dfs["기초재고_전체"]
+            )
+        except Exception as exc:
+            st.error(f"{fname} 처리 중 오류: {exc}")
+
+
+def render_dataframe_tabs(sheet_dfs):
+    tabs = st.tabs(list(sheet_dfs.keys()))
+    for i, sheet_name in enumerate(sheet_dfs.keys()):
+        with tabs[i]:
+            current_df = sheet_dfs[sheet_name]
+            st.write(f"건수: {len(current_df):,}건")
+            st.dataframe(current_df, width='stretch')
+
+
+def render_base_upload(settlement_month):
     st.header("1️⃣ 기초 DB")
 
     uploaded_files = st.file_uploader(
@@ -709,62 +937,19 @@ with tab2:
         accept_multiple_files=True,
     )
 
-    dfs = {
-        "매입조회": None,
-        "검사매출": None,
-        "정비매출": None,
-        "기초재고": None,
-        "기초재고_전체": None,
-        "위탁조회": None,
-    }
-    product_id_df = pd.DataFrame(
-        columns=[
-            "상품ID",
-            "기초재고",
-            "정상입고",
-            "타처입고",
-            "구분1",
-            "구분2",
-            *OUTPUT_DETAIL_COLUMNS,
-        ]
-    )
+    dfs = initialize_base_dfs()
+    product_id_df = empty_product_id_df()
 
     if uploaded_files:
         file_map = {file.name: file for file in uploaded_files}
 
         for fname, file in file_map.items():
             try:
-                if "매입조회" in fname:
-                    dfs["매입조회"] = preprocess_purchase_inquiry(file)
-
-                elif "위탁조회" in fname:
-                    dfs["위탁조회"] = preprocess_consignment(file)
-
-                elif "검사매출" in fname:
-                    dfs["검사매출"] = preprocess_sales(file)
-
-                elif "정비매출" in fname:
-                    dfs["정비매출"] = preprocess_sales(file)
-
+                process_base_file(fname, file, dfs, settlement_month)
             except Exception as exc:
                 st.error(f"{fname} 처리 중 오류: {exc}")
 
-        for fname, file in file_map.items():
-            if "기초재고" not in fname:
-                continue
-
-            try:
-                df_inventory_all, df_inventory_filtered = preprocess_opening_inventory(
-                    file, dfs["매입조회"]
-                )
-                dfs["기초재고_전체"] = df_inventory_all
-                dfs["기초재고"] = df_inventory_filtered
-                dfs["매입조회"] = filter_purchase_inquiry(
-                    dfs["매입조회"], dfs["기초재고_전체"]
-                )
-
-            except Exception as exc:
-                st.error(f"{fname} 처리 중 오류: {exc}")
+        process_opening_inventory_files(file_map, dfs)
 
         st.divider()
         st.subheader("🧾 상품ID 모음")
@@ -780,27 +965,102 @@ with tab2:
                     file_name="product_id_detail.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-                st.dataframe(product_id_df, use_container_width=True)
+                st.dataframe(product_id_df, width='stretch')
         else:
             st.info("상품ID를 가진 업로드 데이터가 아직 없습니다.")
 
     visible_dfs = {
         key: value
         for key, value in dfs.items()
-        if key != "기초재고_전체" and value is not None
+        if key not in HIDDEN_BASE_DF_KEYS and value is not None
     }
     if visible_dfs:
         with st.expander("파일별 개별 데이터 확인"):
-            active_tabs = list(visible_dfs.keys())
-            tabs = st.tabs(active_tabs)
-            for i, tab_name in enumerate(active_tabs):
-                with tabs[i]:
-                    current_df = visible_dfs[tab_name]
-                    st.write(f"건수: {len(current_df):,}건")
-                    st.dataframe(current_df, use_container_width=True)
+            render_dataframe_tabs(visible_dfs)
 
-    st.divider()
-    st.header("2️⃣ 원가")
+    return dfs, product_id_df
+
+
+def preprocess_purchase_cost_files(
+    uploaded_cost_files,
+    product_id_df,
+    dfs,
+    settlement_year,
+    settlement_month,
+):
+    cost_sheet_dfs = {}
+    product_ledger_frames = []
+
+    for file in uploaded_cost_files:
+        if "상품원장" not in file.name:
+            continue
+
+        try:
+            file_label = file.name.rsplit(".", 1)[0]
+            product_ledger_df = preprocess_product_ledger(
+                file,
+                product_id_df,
+                dfs.get("기초재고_전체"),
+                settlement_year,
+                settlement_month,
+            )
+            cost_sheet_dfs[file_label] = product_ledger_df
+            product_ledger_frames.append(product_ledger_df)
+        except Exception as exc:
+            st.error(f"{file.name} 처리 중 오류: {exc}")
+
+    product_ledger_lookup_df = (
+        pd.concat(product_ledger_frames, ignore_index=True)
+        if product_ledger_frames
+        else pd.DataFrame()
+    )
+
+    for file in uploaded_cost_files:
+        if "상품원장" in file.name:
+            continue
+
+        try:
+            file_label = file.name.rsplit(".", 1)[0]
+
+            if "폐자원" in file.name:
+                if product_ledger_lookup_df.empty:
+                    st.warning("폐자원 파일의 상품ID를 가져오려면 상품원장 파일도 함께 업로드하세요.")
+                file_sheets = preprocess_waste_resource_file(file, product_ledger_lookup_df)
+            elif "페이백" in file.name:
+                if product_id_df.empty:
+                    st.warning("페이백 파일의 상품ID를 가져오려면 1번 기초 DB 파일도 함께 업로드하세요.")
+                file_sheets = preprocess_payback_file(
+                    file,
+                    product_id_df,
+                    settlement_year,
+                    settlement_month,
+                )
+            else:
+                file_sheets = preprocess_cost_file(file)
+
+            for sheet_name, df in file_sheets.items():
+                cost_sheet_dfs[f"{file_label}_{sheet_name}"] = df
+        except Exception as exc:
+            st.error(f"{file.name} 처리 중 오류: {exc}")
+
+    return cost_sheet_dfs
+
+
+def render_sheet_workbook(sheet_dfs, download_label, file_name, empty_message):
+    if not sheet_dfs:
+        st.info(empty_message)
+        return
+
+    st.download_button(
+        download_label,
+        data=workbook_to_excel_bytes(sheet_dfs),
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    render_dataframe_tabs(sheet_dfs)
+
+
+def render_purchase_cost_upload(product_id_df, dfs, settlement_year, settlement_month):
     st.subheader("2-1. 매입원가")
 
     uploaded_cost_files = st.file_uploader(
@@ -810,83 +1070,32 @@ with tab2:
         key="cost_files",
     )
 
-    cost_sheet_dfs = {}
+    if not uploaded_cost_files:
+        return {}
 
-    if uploaded_cost_files:
-        if len(uploaded_cost_files) > 3:
-            st.warning("원가 파일은 3개까지 업로드하는 기준으로 처리합니다.")
+    if len(uploaded_cost_files) > 3:
+        st.warning("원가 파일은 3개까지 업로드하는 기준으로 처리합니다.")
 
-        product_ledger_frames = []
+    cost_sheet_dfs = preprocess_purchase_cost_files(
+        uploaded_cost_files,
+        product_id_df,
+        dfs,
+        settlement_year,
+        settlement_month,
+    )
+    render_sheet_workbook(
+        cost_sheet_dfs,
+        "매입원가 전처리 파일 다운로드",
+        "purchase_cost_preprocessed.xlsx",
+        "매입원가 파일에서 표시할 데이터가 없습니다.",
+    )
+    return cost_sheet_dfs
 
-        for file in uploaded_cost_files:
-            if "상품원장" not in file.name:
-                continue
 
-            try:
-                file_label = file.name.rsplit(".", 1)[0]
-                product_ledger_df = preprocess_product_ledger(
-                    file, product_id_df, dfs.get("기초재고_전체")
-                )
-                cost_sheet_dfs[file_label] = product_ledger_df
-                product_ledger_frames.append(product_ledger_df)
-
-            except Exception as exc:
-                st.error(f"{file.name} 처리 중 오류: {exc}")
-
-        product_ledger_lookup_df = (
-            pd.concat(product_ledger_frames, ignore_index=True)
-            if product_ledger_frames
-            else pd.DataFrame()
-        )
-
-        for file in uploaded_cost_files:
-            if "상품원장" in file.name:
-                continue
-
-            try:
-                file_label = file.name.rsplit(".", 1)[0]
-
-                if "폐자원" in file.name:
-                    if product_ledger_lookup_df.empty:
-                        st.warning("폐자원 파일의 상품ID를 가져오려면 상품원장 파일도 함께 업로드하세요.")
-
-                    file_sheets = preprocess_waste_resource_file(file, product_ledger_lookup_df)
-                elif "페이백" in file.name:
-                    if product_id_df.empty:
-                        st.warning("페이백 파일의 상품ID를 가져오려면 1번 기초 DB 파일도 함께 업로드하세요.")
-
-                    file_sheets = preprocess_payback_file(file, product_id_df)
-                else:
-                    file_sheets = preprocess_cost_file(file)
-
-                for sheet_name, df in file_sheets.items():
-                    output_sheet_name = f"{file_label}_{sheet_name}"
-                    cost_sheet_dfs[output_sheet_name] = df
-
-            except Exception as exc:
-                st.error(f"{file.name} 처리 중 오류: {exc}")
-
-        if cost_sheet_dfs:
-            st.download_button(
-                "매입원가 전처리 파일 다운로드",
-                data=workbook_to_excel_bytes(cost_sheet_dfs),
-                file_name="purchase_cost_preprocessed.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-
-            cost_tabs = st.tabs(list(cost_sheet_dfs.keys()))
-            for i, sheet_name in enumerate(cost_sheet_dfs.keys()):
-                with cost_tabs[i]:
-                    current_df = cost_sheet_dfs[sheet_name]
-                    st.write(f"건수: {len(current_df):,}건")
-                    st.dataframe(current_df, use_container_width=True)
-        else:
-            st.info("매입원가 파일에서 표시할 데이터가 없습니다.")
-
-    st.divider()
+def render_manufacturing_cost_upload():
     st.subheader("2-2. 제조원가")
 
-    uploaded_manufacturing_cost_files = st.file_uploader(
+    uploaded_files = st.file_uploader(
         "제조원가 파일을 업로드하세요.",
         type=["xlsx", "xls"],
         accept_multiple_files=True,
@@ -894,36 +1103,41 @@ with tab2:
     )
 
     manufacturing_cost_sheet_dfs = {}
-
-    if uploaded_manufacturing_cost_files:
-        for file in uploaded_manufacturing_cost_files:
+    if uploaded_files:
+        for file in uploaded_files:
             try:
                 file_label = file.name.rsplit(".", 1)[0]
                 file_sheets = preprocess_cost_file(file)
 
                 for sheet_name, df in file_sheets.items():
-                    output_sheet_name = f"{file_label}_{sheet_name}"
-                    manufacturing_cost_sheet_dfs[output_sheet_name] = df
-
+                    manufacturing_cost_sheet_dfs[f"{file_label}_{sheet_name}"] = df
             except Exception as exc:
                 st.error(f"{file.name} 처리 중 오류: {exc}")
 
-        if manufacturing_cost_sheet_dfs:
-            st.download_button(
-                "제조원가 전처리 파일 다운로드",
-                data=workbook_to_excel_bytes(manufacturing_cost_sheet_dfs),
-                file_name="manufacturing_cost_preprocessed.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+        render_sheet_workbook(
+            manufacturing_cost_sheet_dfs,
+            "제조원가 전처리 파일 다운로드",
+            "manufacturing_cost_preprocessed.xlsx",
+            "제조원가 파일에서 표시할 데이터가 없습니다.",
+        )
 
-            manufacturing_cost_tabs = st.tabs(list(manufacturing_cost_sheet_dfs.keys()))
-            for i, sheet_name in enumerate(manufacturing_cost_sheet_dfs.keys()):
-                with manufacturing_cost_tabs[i]:
-                    current_df = manufacturing_cost_sheet_dfs[sheet_name]
-                    st.write(f"건수: {len(current_df):,}건")
-                    st.dataframe(current_df, use_container_width=True)
-        else:
-            st.info("제조원가 파일에서 표시할 데이터가 없습니다.")
+    return manufacturing_cost_sheet_dfs
+
+
+with tab1:
+    st.write("준비 중")
+
+
+with tab2:
+    settlement_year, settlement_month = render_settlement_selector()
+    dfs, product_id_df = render_base_upload(settlement_month)
+
+    st.divider()
+    st.header("2️⃣ 원가")
+    render_purchase_cost_upload(product_id_df, dfs, settlement_year, settlement_month)
+
+    st.divider()
+    render_manufacturing_cost_upload()
 
     st.divider()
     st.header("3️⃣ 원가동인")

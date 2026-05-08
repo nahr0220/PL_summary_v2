@@ -36,12 +36,14 @@ PRODUCT_ID_SOURCE_KEYS = [
     "위탁수불부_입고",
 ]
 PRODUCT_ID_COLUMNS = [
+    "회계연도",
+    "회계월",
     "상품ID",
     "기초재고",
     "정상입고",
     "타처입고",
-    "구분1",
-    "구분2",
+    "당사/타사",
+    "매출구분",
     "선매입여부",
     *OUTPUT_DETAIL_COLUMNS,
 ]
@@ -309,7 +311,7 @@ def _append_vehicle_details(merged, dfs):
     return merged.drop(columns=helper_columns)
 
 
-def collect_product_ids(dfs):
+def collect_product_ids(dfs, settlement_year=None, settlement_month=None):
     base_ids = []
 
     for key in PRODUCT_ID_SOURCE_KEYS:
@@ -360,15 +362,20 @@ def collect_product_ids(dfs):
     internal_sales = merged["구분2"].eq("사내매출")
     merged["매입연도"] = parsed_purchase_date.dt.year.astype("Int64").where(internal_sales, pd.NA)
     merged["매입월"] = parsed_purchase_date.dt.month.astype("Int64").where(internal_sales, pd.NA)
+    merged["회계연도"] = int(settlement_year) if settlement_year is not None else pd.NA
+    merged["회계월"] = int(settlement_month) if settlement_month is not None else pd.NA
     merged = merged.drop(columns=["_출처", "_입고구분"])
+    merged = merged.rename(columns={"구분1": "당사/타사", "구분2": "매출구분"})
     merged = merged[
         [
+            "회계연도",
+            "회계월",
             "상품ID",
             "기초재고",
             "정상입고",
             "타처입고",
-            "구분1",
-            "구분2",
+            "당사/타사",
+            "매출구분",
             "선매입여부",
             *OUTPUT_DETAIL_COLUMNS,
         ]
@@ -828,6 +835,22 @@ def workbook_to_excel_bytes(sheet_dfs):
     return output.getvalue()
 
 
+def dataframe_for_display(df):
+    display_df = df.copy()
+    display_df.columns = [str(column) for column in display_df.columns]
+
+    for column in display_df.columns:
+        if (
+            pd.api.types.is_object_dtype(display_df[column])
+            or pd.api.types.is_string_dtype(display_df[column])
+        ):
+            display_df[column] = display_df[column].apply(
+                lambda value: "" if pd.isna(value) else str(value)
+            )
+
+    return display_df
+
+
 def empty_product_id_df():
     return pd.DataFrame(columns=PRODUCT_ID_COLUMNS)
 
@@ -929,7 +952,7 @@ def render_dataframe_tabs(sheet_dfs):
         with tabs[i]:
             current_df = sheet_dfs[sheet_name]
             st.write(f"건수: {len(current_df):,}건")
-            st.dataframe(current_df, width='stretch')
+            st.dataframe(dataframe_for_display(current_df), width='stretch')
 
 
 def _unique_sheet_label(sheet_dfs, label):
@@ -944,7 +967,7 @@ def _unique_sheet_label(sheet_dfs, label):
     return unique_label
 
 
-def render_base_upload(settlement_month):
+def render_base_upload(settlement_year, settlement_month):
     st.header("1️⃣ 기초 DB")
 
     uploaded_files = st.file_uploader(
@@ -969,7 +992,7 @@ def render_base_upload(settlement_month):
 
         st.divider()
         st.subheader("🧾 상품ID 모음")
-        product_id_df = collect_product_ids(dfs)
+        product_id_df = collect_product_ids(dfs, settlement_year, settlement_month)
 
         if not product_id_df.empty:
             st.write(f"통합 데이터 건수: {len(product_id_df):,}건")
@@ -981,7 +1004,7 @@ def render_base_upload(settlement_month):
                     file_name="product_id_detail.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-                st.dataframe(product_id_df, width='stretch')
+                st.dataframe(dataframe_for_display(product_id_df), width='stretch')
         else:
             st.info("상품ID를 가진 업로드 데이터가 아직 없습니다.")
 
@@ -1149,7 +1172,7 @@ with tab1:
 
 with tab2:
     settlement_year, settlement_month = render_settlement_selector()
-    dfs, product_id_df = render_base_upload(settlement_month)
+    dfs, product_id_df = render_base_upload(settlement_year, settlement_month)
 
     st.divider()
     st.header("2️⃣ 원가")

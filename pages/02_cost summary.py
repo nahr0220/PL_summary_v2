@@ -69,6 +69,14 @@ PRODUCT_LEDGER_TOTAL_COST_COLUMNS = [
     PAYBACK_UNRETURNED_COLUMN,
     EXCESS_DRIVING_COLUMN,
 ]
+FINAL_COST_MONTHLY_COLUMNS = [
+    *PURCHASE_AMOUNT_COLUMNS,
+    WASTE_RESOURCE_COLUMN,
+    DIFFERENCE_ALLOCATION_COLUMN,
+    PAYBACK_RETURN_COLUMN,
+    PAYBACK_UNRETURNED_COLUMN,
+    EXCESS_DRIVING_COLUMN,
+]
 MATERIAL_SALES_COLUMNS = ["정비매출", "사내매출", "위탁매출"]
 BASE_DF_KEYS = [
     "매입조회",
@@ -759,11 +767,36 @@ def _build_product_ledger_lookup(product_ledger_df):
     return dict(zip(ledger["_차량번호_lookup"], ledger["상품ID"]))
 
 
+def _build_product_id_lookup_by_column(detail_df, lookup_column):
+    if (
+        detail_df is None
+        or detail_df.empty
+        or lookup_column not in detail_df.columns
+        or "상품ID" not in detail_df.columns
+    ):
+        return {}
+
+    detail = _strip_columns(detail_df)
+    detail = detail.copy()
+    detail["_lookup_key"] = detail[lookup_column].apply(_normalize_lookup_value)
+    detail = detail[detail["_lookup_key"] != ""].copy()
+
+    if detail.empty:
+        return {}
+
+    detail = detail.drop_duplicates(subset=["_lookup_key"], keep="last")
+    return dict(zip(detail["_lookup_key"], detail["상품ID"]))
+
+
 # 폐자원
-def preprocess_waste_resource_file(file, product_ledger_df=None):
+def preprocess_waste_resource_file(file, product_ledger_df=None, detail_df=None):
     file.seek(0)
     sheets = pd.read_excel(file, sheet_name=None)
     product_id_by_car_number = _build_product_ledger_lookup(product_ledger_df)
+    product_id_by_chassis_number = _build_product_id_lookup_by_column(
+        detail_df,
+        "차대번호",
+    )
     processed_sheets = {}
 
     for sheet_name, df in sheets.items():
@@ -779,6 +812,15 @@ def preprocess_waste_resource_file(file, product_ledger_df=None):
             )
         else:
             df["상품ID"] = ""
+
+        if "차량번호" in df.columns and "차대번호" in df.columns:
+            forklift_rows = df["차량번호"].astype(str).str.strip().eq("지게차")
+            forklift_product_ids = df.loc[forklift_rows, "차대번호"].apply(
+                lambda value: product_id_by_chassis_number.get(
+                    _normalize_lookup_value(value), ""
+                )
+            )
+            df.loc[forklift_rows, "상품ID"] = forklift_product_ids
 
         tax_credit_column = next(
             (column for column in WASTE_RESOURCE_AMOUNT_COLUMNS if column in df.columns),
@@ -865,8 +907,11 @@ def preprocess_payback_file(
 
             for index, row in df.iterrows():
                 car_number = str(row["차량번호"]).strip() if pd.notna(row["차량번호"]) else ""
+                normalized_car_number = _normalize_lookup_value(car_number)
 
-                if car_number == "지게차":
+                if len(normalized_car_number) == 12:
+                    product_id = normalized_car_number
+                elif car_number == "지게차":
                     product_id = original_product_ids.loc[index]
                 else:
                     product_id = _lookup_product_id_by_car_number(car_number, detail_lookup)
@@ -1344,9 +1389,13 @@ def preprocess_purchase_cost_files(
             file_label = file.name.rsplit(".", 1)[0]
 
             if "폐자원" in file.name:
-                if product_ledger_lookup_df.empty:
-                    st.warning("폐자원 파일의 상품ID를 가져오려면 상품원장 파일도 함께 업로드하세요.")
-                file_sheets = preprocess_waste_resource_file(file, product_ledger_lookup_df)
+                if product_id_df.empty and product_ledger_lookup_df.empty:
+                    st.warning("폐자원 파일의 상품ID를 가져오려면 1번 기초 DB 또는 상품원장 파일도 함께 업로드하세요.")
+                file_sheets = preprocess_waste_resource_file(
+                    file,
+                    product_ledger_lookup_df,
+                    product_id_df,
+                )
                 display_label = "폐자원공제"
             elif "페이백" in file.name:
                 if product_id_df.empty:
@@ -1497,21 +1546,151 @@ def render_manufacturing_cost_upload(product_id_df, settlement_year, settlement_
     return manufacturing_cost_sheet_dfs
 
 
-def build_final_cost_df(product_id_df, purchase_cost_sheet_dfs):
+def _append_previous_month_cost_columns(
+    final_df,
+    inventory_df,
+    settlement_month=None,
+    transfer_in_amount_map=None,
+):
+    previous_columns = [f"{column}_전월" for column in FINAL_COST_MONTHLY_COLUMNS]
+
+    for column in previous_columns:
+        final_df[column] = 0
+
+    if (
+        inventory_df is not None
+        and not inventory_df.empty
+        and "상품ID" in inventory_df.columns
+    ):
+        inventory = _strip_columns(inventory_df)
+        inventory = inventory.copy()
+
+        if settlement_month is not None:
+            previous_month = 12 if int(settlement_month) == 1 else int(settlement_month) - 1
+            previous_flag_column = f"{previous_month}월 기말여부"
+            if previous_flag_column in inventory.columns:
+                inventory = inventory[_is_flag_one(inventory[previous_flag_column])].copy()
+            else:
+                inventory = inventory.iloc[0:0].copy()
+
+        inventory["상품ID"] = inventory["상품ID"].astype(str).str.strip()
+        inventory = inventory[inventory["상품ID"].ne("")].copy()
+
+        available_previous_columns = [
+            column for column in previous_columns if column in inventory.columns
+        ]
+
+        if available_previous_columns and not inventory.empty:
+            for column in available_previous_columns:
+                inventory[column] = pd.to_numeric(
+                    inventory[column], errors="coerce"
+                ).fillna(0)
+
+            previous_df = (
+                inventory.groupby("상품ID", as_index=False)[available_previous_columns]
+                .sum()
+            )
+            previous_df["_상품ID_lookup"] = previous_df["상품ID"].astype(str).str.strip()
+            previous_df = previous_df[["_상품ID_lookup", *available_previous_columns]]
+
+            final_df["_상품ID_lookup"] = final_df["상품ID"].astype(str).str.strip()
+            final_df = final_df.drop(columns=available_previous_columns)
+            final_df = final_df.merge(previous_df, on="_상품ID_lookup", how="left")
+            final_df = final_df.drop(columns=["_상품ID_lookup"])
+
+    for column in FINAL_COST_MONTHLY_COLUMNS:
+        previous_column = f"{column}_전월"
+        total_column = f"{column}_합계"
+
+        if column not in final_df.columns:
+            final_df[column] = 0
+        if previous_column not in final_df.columns:
+            final_df[previous_column] = 0
+
+        final_df[column] = pd.to_numeric(final_df[column], errors="coerce").fillna(0)
+        final_df[previous_column] = pd.to_numeric(
+            final_df[previous_column], errors="coerce"
+        ).fillna(0)
+        final_df[total_column] = final_df[previous_column] + final_df[column]
+
+    # 상품매입액_전월 재계산:
+    # 타처입고 컬럼이 1이면 → 상품원장의 원가구분이 '타처입고'인 해당 상품ID의 금액으로 덮어쓰기
+    purchase_previous_column = "상품매입액_전월"
+    purchase_total_column = "상품매입액_합계"
+
+    if (
+        transfer_in_amount_map is not None
+        and "타처입고" in final_df.columns
+        and purchase_previous_column in final_df.columns
+    ):
+        transfer_in_rows = _is_flag_one(final_df["타처입고"])
+
+        if transfer_in_rows.any():
+            lookup_ids = final_df.loc[transfer_in_rows, "상품ID"].astype(str).str.strip()
+            mapped_amounts = (
+                lookup_ids.map(transfer_in_amount_map)
+                .pipe(lambda s: pd.to_numeric(s, errors="coerce"))
+                .fillna(0)
+            )
+            final_df.loc[transfer_in_rows, purchase_previous_column] = mapped_amounts.values
+
+            # 합계 재계산
+            final_df[purchase_total_column] = (
+                pd.to_numeric(final_df[purchase_previous_column], errors="coerce").fillna(0)
+                + pd.to_numeric(final_df["상품매입액"], errors="coerce").fillna(0)
+            )
+
+    # 당사/타사 필터: 전월/합계 컬럼은 당사차량 행만 유효. 타사차량 행은 0으로 정리.
+    if "당사/타사" in final_df.columns:
+        own_vehicle_rows = final_df["당사/타사"].astype(str).str.strip().eq("당사차량")
+        non_own_vehicle_rows = ~own_vehicle_rows
+        if non_own_vehicle_rows.any():
+            previous_and_total_columns = []
+            for column in FINAL_COST_MONTHLY_COLUMNS:
+                previous_and_total_columns.append(f"{column}_전월")
+                previous_and_total_columns.append(f"{column}_합계")
+            existing_columns = [
+                column for column in previous_and_total_columns if column in final_df.columns
+            ]
+            final_df.loc[non_own_vehicle_rows, existing_columns] = 0
+
+    return final_df
+
+
+def build_final_cost_df(
+    product_id_df,
+    purchase_cost_sheet_dfs,
+    inventory_df=None,
+    settlement_month=None,
+):
     final_df = product_id_df.copy()
 
     for column in FINAL_COST_AMOUNT_COLUMNS:
         final_df[column] = 0
     final_df[DIFFERENCE_ALLOCATION_COLUMN] = 0
 
-    if final_df.empty or not purchase_cost_sheet_dfs:
+    if final_df.empty:
         return final_df
+
+    if not purchase_cost_sheet_dfs:
+        final_df = _append_previous_month_cost_columns(
+            final_df,
+            inventory_df,
+            settlement_month,
+        )
+        tail_columns = []
+        for column in FINAL_COST_MONTHLY_COLUMNS:
+            tail_columns.extend([f"{column}_합계", f"{column}_전월", column])
+        tail_columns = [column for column in tail_columns if column in final_df.columns]
+        base_columns = [column for column in final_df.columns if column not in tail_columns]
+        return final_df[base_columns + tail_columns]
 
     product_ledger_frames = []
     required_columns = ["상품ID", "원가구분", "금액"]
     product_ledger_cost_totals = {
         column: 0 for column in PRODUCT_LEDGER_TOTAL_COST_COLUMNS
     }
+    transfer_in_amount_map = {}
 
     for sheet_name, df in purchase_cost_sheet_dfs.items():
         if not str(sheet_name).startswith("상품원장"):
@@ -1541,6 +1720,16 @@ def build_final_cost_df(product_id_df, purchase_cost_sheet_dfs):
             .sum()
             .to_dict()
         )
+
+        # 상품원장에서 원가구분이 '타처입고'인 항목의 상품ID별 금액 합계
+        transfer_in_df = product_ledger_df[
+            product_ledger_df["원가구분"].eq("타처입고")
+            & product_ledger_df["상품ID"].ne("")
+        ]
+        if not transfer_in_df.empty:
+            transfer_in_amount_map = (
+                transfer_in_df.groupby("상품ID")["금액"].sum().to_dict()
+            )
 
         purchase_amount_df = product_ledger_df[
             product_ledger_df["원가구분"].isin(PURCHASE_AMOUNT_COLUMNS)
@@ -1765,28 +1954,33 @@ def build_final_cost_df(product_id_df, purchase_cost_sheet_dfs):
                 first_index = final_df.index[allocation_rows][0]
                 final_df.loc[first_index, EXCESS_DRIVING_COLUMN] += remainder
 
-    tail_columns = [
-        column
-        for column in [
-            *PURCHASE_AMOUNT_COLUMNS,
-            WASTE_RESOURCE_COLUMN,
-            DIFFERENCE_ALLOCATION_COLUMN,
-            PAYBACK_RETURN_COLUMN,
-            PAYBACK_UNRETURNED_COLUMN,
-            EXCESS_DRIVING_COLUMN,
-        ]
-        if column in final_df.columns
-    ]
+    final_df = _append_previous_month_cost_columns(
+        final_df,
+        inventory_df,
+        settlement_month,
+        transfer_in_amount_map=transfer_in_amount_map,
+    )
+
+    tail_columns = []
+    for column in FINAL_COST_MONTHLY_COLUMNS:
+        tail_columns.extend([f"{column}_합계", f"{column}_전월", column])
+
+    tail_columns = [column for column in tail_columns if column in final_df.columns]
     base_columns = [column for column in final_df.columns if column not in tail_columns]
     final_df = final_df[base_columns + tail_columns]
 
     return final_df
 
 
-def render_final_cost(product_id_df, purchase_cost_sheet_dfs):
+def render_final_cost(product_id_df, purchase_cost_sheet_dfs, dfs, settlement_month):
     st.header("4️⃣ 최종 원가 생성")
 
-    final_cost_df = build_final_cost_df(product_id_df, purchase_cost_sheet_dfs)
+    final_cost_df = build_final_cost_df(
+        product_id_df,
+        purchase_cost_sheet_dfs,
+        dfs.get("기초재고_전체"),
+        settlement_month,
+    )
 
     if final_cost_df.empty:
         st.info("1번 기초 DB 데이터를 업로드하면 최종 원가 초안이 생성됩니다.")
@@ -1831,4 +2025,4 @@ with tab2:
     st.header("3️⃣ 원가동인")
 
     st.divider()
-    render_final_cost(product_id_df, purchase_cost_sheet_dfs)
+    render_final_cost(product_id_df, purchase_cost_sheet_dfs, dfs, settlement_month)

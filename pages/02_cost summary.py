@@ -47,6 +47,29 @@ PRODUCT_ID_COLUMNS = [
     "선매입여부",
     *OUTPUT_DETAIL_COLUMNS,
 ]
+PURCHASE_AMOUNT_COLUMNS = ["상품매입액", "취득세", "매입수수료"]
+WASTE_RESOURCE_COLUMN = "폐자원공제"
+PAYBACK_RETURN_COLUMN = "페이백(반납)"
+PAYBACK_UNRETURNED_COLUMN = "페이백(미반납)"
+EXCESS_DRIVING_COLUMN = "초과운행"
+FINAL_COST_AMOUNT_COLUMNS = [
+    *PURCHASE_AMOUNT_COLUMNS,
+    WASTE_RESOURCE_COLUMN,
+    PAYBACK_RETURN_COLUMN,
+    PAYBACK_UNRETURNED_COLUMN,
+    EXCESS_DRIVING_COLUMN,
+]
+WASTE_RESOURCE_AMOUNT_COLUMNS = ["매입세금공제액", "매입세액공제액", "매입세액공제"]
+PAYBACK_RETURN_AMOUNT_COLUMNS = ["선수수익(VAT外)", "선수수익(VAT외)", "선수수익(VAT 外)"]
+DIFFERENCE_ALLOCATION_COLUMN = "차액배부"
+DIFFERENCE_SOURCE_COST_COLUMNS = ["취득세", "매입수수료", WASTE_RESOURCE_COLUMN]
+PRODUCT_LEDGER_TOTAL_COST_COLUMNS = [
+    *DIFFERENCE_SOURCE_COST_COLUMNS,
+    PAYBACK_RETURN_COLUMN,
+    PAYBACK_UNRETURNED_COLUMN,
+    EXCESS_DRIVING_COLUMN,
+]
+MATERIAL_SALES_COLUMNS = ["정비매출", "사내매출", "위탁매출"]
 BASE_DF_KEYS = [
     "매입조회",
     "검사매출",
@@ -238,11 +261,38 @@ def _build_detail_frame(df, date_column):
     return detail.drop_duplicates(subset=["상품ID"], keep="first").reset_index(drop=True)
 
 
+def _build_sales_vehicle_detail_frame(df):
+    columns = ["상품ID", *DETAIL_COLUMNS]
+
+    if df is None or df.empty or "상품ID" not in df.columns:
+        return pd.DataFrame(columns=columns)
+
+    temp = _strip_columns(df)
+    temp["상품ID"] = temp["상품ID"].astype(str).str.strip()
+    temp = temp[temp["상품ID"] != ""].copy()
+
+    if temp.empty:
+        return pd.DataFrame(columns=columns)
+
+    vehicle_numbers = _get_first_existing_column(temp, ["차량번호", "신번호"])
+    detail = pd.DataFrame({"상품ID": temp["상품ID"]})
+    detail["신번호"] = vehicle_numbers
+    detail["구번호"] = vehicle_numbers
+
+    for column in DETAIL_COLUMNS:
+        if column not in ["신번호", "구번호"]:
+            detail[column] = ""
+
+    return detail.drop_duplicates(subset=["상품ID"], keep="first").reset_index(drop=True)
+
+
 def _append_vehicle_details(merged, dfs):
     purchase_detail = _build_detail_frame(dfs.get("매입조회"), "계산서일자")
     inventory_detail = _build_detail_frame(dfs.get("기초재고"), "계산서일자")
     product_master_detail = _build_detail_frame(dfs.get("전체상품조회"), "매입세금계산서일자")
     consignment_ledger_detail = _build_detail_frame(dfs.get("위탁수불부_전체"), None)
+    inspection_detail = _build_sales_vehicle_detail_frame(dfs.get("검사매출"))
+    maintenance_detail = _build_sales_vehicle_detail_frame(dfs.get("정비매출"))
 
     purchase_detail = purchase_detail.rename(
         columns={column: f"매입_{column}" for column in DETAIL_COLUMNS}
@@ -256,14 +306,23 @@ def _append_vehicle_details(merged, dfs):
     consignment_ledger_detail = consignment_ledger_detail.rename(
         columns={column: f"위탁수불_{column}" for column in DETAIL_COLUMNS}
     )
+    inspection_detail = inspection_detail.rename(
+        columns={column: f"검사_{column}" for column in DETAIL_COLUMNS}
+    )
+    maintenance_detail = maintenance_detail.rename(
+        columns={column: f"정비_{column}" for column in DETAIL_COLUMNS}
+    )
 
     merged = merged.merge(purchase_detail, on="상품ID", how="left")
     merged = merged.merge(inventory_detail, on="상품ID", how="left")
     merged = merged.merge(product_master_detail, on="상품ID", how="left")
     merged = merged.merge(consignment_ledger_detail, on="상품ID", how="left")
+    merged = merged.merge(inspection_detail, on="상품ID", how="left")
+    merged = merged.merge(maintenance_detail, on="상품ID", how="left")
 
     use_inventory = merged["_출처"].eq("기초재고")
-    no_detail_sales = merged["구분2"].isin(["검사매출", "정비매출"])
+    use_inspection = merged["_출처"].eq("검사매출")
+    use_maintenance = merged["_출처"].eq("정비매출")
     helper_columns = []
 
     for column in DETAIL_COLUMNS:
@@ -271,12 +330,16 @@ def _append_vehicle_details(merged, dfs):
         inventory_column = f"기초_{column}"
         product_master_column = f"전체_{column}"
         consignment_ledger_column = f"위탁수불_{column}"
+        inspection_column = f"검사_{column}"
+        maintenance_column = f"정비_{column}"
         helper_columns.extend(
             [
                 purchase_column,
                 inventory_column,
                 product_master_column,
                 consignment_ledger_column,
+                inspection_column,
+                maintenance_column,
             ]
         )
 
@@ -284,6 +347,8 @@ def _append_vehicle_details(merged, dfs):
         inventory_values = merged[inventory_column].replace("", pd.NA)
         product_master_values = merged[product_master_column].replace("", pd.NA)
         consignment_ledger_values = merged[consignment_ledger_column].replace("", pd.NA)
+        inspection_values = merged[inspection_column].replace("", pd.NA)
+        maintenance_values = merged[maintenance_column].replace("", pd.NA)
 
         default_result = purchase_values.combine_first(inventory_values).combine_first(
             product_master_values
@@ -297,6 +362,8 @@ def _append_vehicle_details(merged, dfs):
         consignment_ledger_result = consignment_ledger_values.combine_first(
             product_master_values
         ).combine_first(purchase_values).combine_first(inventory_values)
+        inspection_result = inspection_values.fillna("")
+        maintenance_result = maintenance_values.fillna("")
 
         result = default_result
         result = result.where(~merged["_출처"].eq("전체상품조회"), product_master_result)
@@ -305,7 +372,8 @@ def _append_vehicle_details(merged, dfs):
             consignment_ledger_result,
         )
         result = result.where(~use_inventory, inventory_result)
-        result = result.where(~no_detail_sales, "")
+        result = result.where(~use_inspection, inspection_result)
+        result = result.where(~use_maintenance, maintenance_result)
         merged[column] = result.fillna("")
 
     return merged.drop(columns=helper_columns)
@@ -567,7 +635,15 @@ def _lookup_product_id_by_car_number(car_number, detail_lookup, fallback_lookup=
 
 
 def _append_product_ledger_purchase_columns(df, detail_df, inventory_all_df=None):
-    detail_lookup = _build_detail_lookup(detail_df)
+    detail_lookup_df = detail_df
+    if detail_lookup_df is not None and not detail_lookup_df.empty:
+        detail_lookup_df = _strip_columns(detail_lookup_df)
+        if "당사/타사" in detail_lookup_df.columns:
+            detail_lookup_df = detail_lookup_df[
+                detail_lookup_df["당사/타사"].astype(str).str.strip().eq("당사차량")
+            ].copy()
+
+    detail_lookup = _build_detail_lookup(detail_lookup_df)
     inventory_detail_df = _build_detail_frame(inventory_all_df, "위탁등록일자")
     inventory_lookup = _build_detail_lookup(inventory_detail_df)
     product_id_cache = {}
@@ -704,8 +780,12 @@ def preprocess_waste_resource_file(file, product_ledger_df=None):
         else:
             df["상품ID"] = ""
 
-        if "매입세액공제액" in df.columns:
-            tax_credit = pd.to_numeric(df["매입세액공제액"], errors="coerce").fillna(0)
+        tax_credit_column = next(
+            (column for column in WASTE_RESOURCE_AMOUNT_COLUMNS if column in df.columns),
+            None,
+        )
+        if tax_credit_column is not None:
+            tax_credit = pd.to_numeric(df[tax_credit_column], errors="coerce").fillna(0)
             df["제외대상"] = np.where(tax_credit < 0, 1, 0)
         else:
             df["제외대상"] = 0
@@ -796,6 +876,209 @@ def preprocess_payback_file(
             df["상품ID"] = product_ids
         elif "상품ID" not in df.columns:
             df["상품ID"] = ""
+
+        processed_sheets[sheet_name] = df
+
+    return processed_sheets
+
+
+def _build_vehicle_sales_count_lookup(detail_df):
+    lookup = {
+        sales_type: {"신번호": {}, "구번호": {}}
+        for sales_type in MATERIAL_SALES_COLUMNS
+    }
+
+    if detail_df is None or detail_df.empty:
+        return lookup
+
+    detail = _strip_columns(detail_df)
+    required_columns = ["매출구분", "신번호", "구번호"]
+    if any(column not in detail.columns for column in required_columns):
+        return lookup
+
+    detail = detail.copy()
+    detail["_신번호_lookup"] = detail["신번호"].apply(_normalize_lookup_value)
+    detail["_구번호_lookup"] = detail["구번호"].apply(_normalize_lookup_value)
+    detail["매출구분"] = detail["매출구분"].astype(str).str.strip()
+
+    for sales_type in MATERIAL_SALES_COLUMNS:
+        sales_rows = detail[detail["매출구분"].eq(sales_type)].copy()
+
+        new_counts = sales_rows.loc[
+            sales_rows["_신번호_lookup"] != "", "_신번호_lookup"
+        ].value_counts()
+        old_counts = sales_rows.loc[
+            sales_rows["_구번호_lookup"] != "", "_구번호_lookup"
+        ].value_counts()
+
+        lookup[sales_type]["신번호"] = new_counts.to_dict()
+        lookup[sales_type]["구번호"] = old_counts.to_dict()
+
+    return lookup
+
+
+def _get_row_sales_count(row, sales_type, sales_count_lookup):
+    vehicle_number = row["차량번호"] if "차량번호" in row.index else ""
+    old_vehicle_number = row["구차량번호"] if "구차량번호" in row.index else ""
+
+    vehicle_key = _normalize_lookup_value(vehicle_number)
+    old_vehicle_key = _normalize_lookup_value(old_vehicle_number)
+
+    return (
+        sales_count_lookup[sales_type]["신번호"].get(vehicle_key, 0)
+        + sales_count_lookup[sales_type]["구번호"].get(old_vehicle_key, 0)
+    )
+
+
+def preprocess_material_cost_file(file, detail_df=None):
+    file.seek(0)
+    sheets = pd.read_excel(file, sheet_name=None)
+    sales_count_lookup = _build_vehicle_sales_count_lookup(detail_df)
+    processed_sheets = {}
+
+    for sheet_name, df in sheets.items():
+        df = _strip_columns(df)
+        df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+
+        if "출고부품분류" in df.columns:
+            df["원가구분"] = np.where(
+                df["출고부품분류"].astype(str).str.strip().eq("원재료비 대체"),
+                "재료비",
+                "",
+            )
+        else:
+            df["원가구분"] = ""
+
+        if "차량입고일자" in df.columns:
+            parsed_inbound_date = pd.to_datetime(
+                df["차량입고일자"], format="mixed", errors="coerce"
+            )
+            df["출고년도"] = parsed_inbound_date.dt.year.astype("Int64")
+            df["출고월"] = parsed_inbound_date.dt.month.astype("Int64")
+        else:
+            df["출고년도"] = pd.NA
+            df["출고월"] = pd.NA
+
+        for sales_type in MATERIAL_SALES_COLUMNS:
+            df[sales_type] = df.apply(
+                lambda row: _get_row_sales_count(row, sales_type, sales_count_lookup),
+                axis=1,
+            )
+
+        df["매출구분"] = np.select(
+            [
+                df["정비매출"].gt(0),
+                df["사내매출"].gt(0),
+                df["위탁매출"].gt(0),
+            ],
+            ["정비매출", "사내매출", "위탁매출"],
+            default="",
+        )
+
+        vehicle_numbers = (
+            df["차량번호"].apply(lambda value: "" if pd.isna(value) else str(value).strip())
+            if "차량번호" in df.columns
+            else pd.Series([""] * len(df), index=df.index)
+        )
+        df["구분자"] = np.where(
+            df["매출구분"].astype(str).str.strip().ne("") & vehicle_numbers.ne(""),
+            df["매출구분"].astype(str).str.strip() + "_" + vehicle_numbers,
+            "",
+        )
+
+        processed_sheets[sheet_name] = df
+
+    return processed_sheets
+
+
+def preprocess_combined_manufacturing_cost_files(
+    files,
+    cost_type,
+    settlement_year=None,
+    settlement_month=None,
+):
+    cost_frames = []
+
+    for file in files:
+        file.seek(0)
+        sheets = pd.read_excel(file, sheet_name=None)
+
+        for _, df in sheets.items():
+            df = _strip_columns(df)
+            df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+
+            if not df.empty:
+                cost_frames.append(df)
+
+    if not cost_frames:
+        return pd.DataFrame()
+
+    df = pd.concat(cost_frames, ignore_index=True)
+
+    if "회계일자" in df.columns:
+        accounting_date_text = df["회계일자"].astype(str).str.strip()
+        df = df[~accounting_date_text.isin(["월계", "누계"])].copy()
+
+    if "작성사원명" in df.columns:
+        df = df[df["작성사원명"].astype(str).str.strip().ne("김겸윤")].copy()
+
+    df["원가구분"] = cost_type
+
+    if "회계일자" in df.columns:
+        parsed_accounting_date = pd.to_datetime(
+            df["회계일자"], format="mixed", errors="coerce"
+        )
+        df["회계연도"] = parsed_accounting_date.dt.year.astype("Int64")
+        df["회계월"] = parsed_accounting_date.dt.month.astype("Int64")
+    else:
+        df["회계연도"] = pd.NA
+        df["회계월"] = pd.NA
+
+    if settlement_year is not None and settlement_month is not None:
+        df = df[
+            (df["회계연도"] == int(settlement_year))
+            & (df["회계월"] == int(settlement_month))
+        ].copy()
+
+    summary_text = (
+        df["적요"].astype(str)
+        if "적요" in df.columns
+        else pd.Series([""] * len(df), index=df.index)
+    )
+    df["배부대상"] = np.select(
+        [
+            summary_text.str.contains("RQI", na=False),
+            summary_text.str.contains("반납운영팀", na=False),
+            summary_text.str.contains("공정지원팀", na=False),
+            summary_text.str.contains("도장파트", na=False),
+            summary_text.str.contains("판금파트", na=False),
+            summary_text.str.contains("정비파트", na=False),
+        ],
+        ["RQI", "선물", "전체", "도장", "판금", "정비"],
+        default="기타",
+    )
+
+    return df.reset_index(drop=True)
+
+
+def preprocess_direct_expense_file(file):
+    file.seek(0)
+    sheets = pd.read_excel(file, sheet_name=None)
+    processed_sheets = {}
+
+    for sheet_name, df in sheets.items():
+        df = _strip_columns(df)
+        df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+
+        if "매입일" in df.columns:
+            parsed_purchase_date = pd.to_datetime(
+                df["매입일"], format="mixed", errors="coerce"
+            )
+            df["회계연도"] = parsed_purchase_date.dt.year.astype("Int64")
+            df["회계월"] = parsed_purchase_date.dt.month.astype("Int64")
+        else:
+            df["회계연도"] = pd.NA
+            df["회계월"] = pd.NA
 
         processed_sheets[sheet_name] = df
 
@@ -1134,7 +1417,7 @@ def render_purchase_cost_upload(product_id_df, dfs, settlement_year, settlement_
     return cost_sheet_dfs
 
 
-def render_manufacturing_cost_upload():
+def render_manufacturing_cost_upload(product_id_df, settlement_year, settlement_month):
     st.subheader("2-2. 제조원가")
 
     uploaded_files = st.file_uploader(
@@ -1146,13 +1429,61 @@ def render_manufacturing_cost_upload():
 
     manufacturing_cost_sheet_dfs = {}
     if uploaded_files:
+        labor_files = [file for file in uploaded_files if "노무비" in file.name]
+        department_expense_files = [
+            file for file in uploaded_files if "부문별경비" in file.name
+        ]
+
+        if labor_files:
+            try:
+                labor_df = preprocess_combined_manufacturing_cost_files(
+                    labor_files,
+                    "노무비",
+                    settlement_year,
+                    settlement_month,
+                )
+                manufacturing_cost_sheet_dfs[
+                    _unique_sheet_label(manufacturing_cost_sheet_dfs, "노무비")
+                ] = labor_df
+            except Exception as exc:
+                st.error(f"노무비 파일 처리 중 오류: {exc}")
+
+        if department_expense_files:
+            try:
+                department_expense_df = preprocess_combined_manufacturing_cost_files(
+                    department_expense_files,
+                    "제조경비",
+                    settlement_year,
+                    settlement_month,
+                )
+                manufacturing_cost_sheet_dfs[
+                    _unique_sheet_label(manufacturing_cost_sheet_dfs, "부문별경비")
+                ] = department_expense_df
+            except Exception as exc:
+                st.error(f"부문별경비 파일 처리 중 오류: {exc}")
+
         for file in uploaded_files:
+            if "노무비" in file.name or "부문별경비" in file.name:
+                continue
+
             try:
                 file_label = file.name.rsplit(".", 1)[0]
-                file_sheets = preprocess_cost_file(file)
+
+                if "재료비" in file.name:
+                    file_sheets = preprocess_material_cost_file(file, product_id_df)
+                    display_label = "재료비"
+                elif "직접경비" in file.name:
+                    file_sheets = preprocess_direct_expense_file(file)
+                    display_label = "직접경비"
+                else:
+                    file_sheets = preprocess_cost_file(file)
+                    display_label = None
 
                 for sheet_name, df in file_sheets.items():
-                    manufacturing_cost_sheet_dfs[f"{file_label}_{sheet_name}"] = df
+                    output_sheet_name = display_label or f"{file_label}_{sheet_name}"
+                    manufacturing_cost_sheet_dfs[
+                        _unique_sheet_label(manufacturing_cost_sheet_dfs, output_sheet_name)
+                    ] = df
             except Exception as exc:
                 st.error(f"{file.name} 처리 중 오류: {exc}")
 
@@ -1166,6 +1497,316 @@ def render_manufacturing_cost_upload():
     return manufacturing_cost_sheet_dfs
 
 
+def build_final_cost_df(product_id_df, purchase_cost_sheet_dfs):
+    final_df = product_id_df.copy()
+
+    for column in FINAL_COST_AMOUNT_COLUMNS:
+        final_df[column] = 0
+    final_df[DIFFERENCE_ALLOCATION_COLUMN] = 0
+
+    if final_df.empty or not purchase_cost_sheet_dfs:
+        return final_df
+
+    product_ledger_frames = []
+    required_columns = ["상품ID", "원가구분", "금액"]
+    product_ledger_cost_totals = {
+        column: 0 for column in PRODUCT_LEDGER_TOTAL_COST_COLUMNS
+    }
+
+    for sheet_name, df in purchase_cost_sheet_dfs.items():
+        if not str(sheet_name).startswith("상품원장"):
+            continue
+
+        if df is None or df.empty:
+            continue
+
+        if any(column not in df.columns for column in required_columns):
+            continue
+
+        product_ledger_frames.append(df[required_columns].copy())
+
+    if product_ledger_frames:
+        product_ledger_df = pd.concat(product_ledger_frames, ignore_index=True)
+        product_ledger_df["상품ID"] = product_ledger_df["상품ID"].astype(str).str.strip()
+        product_ledger_df["원가구분"] = product_ledger_df["원가구분"].astype(str).str.strip()
+        product_ledger_df["금액"] = pd.to_numeric(
+            product_ledger_df["금액"], errors="coerce"
+        ).fillna(0)
+
+        product_ledger_cost_totals.update(
+            product_ledger_df[
+                product_ledger_df["원가구분"].isin(PRODUCT_LEDGER_TOTAL_COST_COLUMNS)
+            ]
+            .groupby("원가구분")["금액"]
+            .sum()
+            .to_dict()
+        )
+
+        purchase_amount_df = product_ledger_df[
+            product_ledger_df["원가구분"].isin(PURCHASE_AMOUNT_COLUMNS)
+            & product_ledger_df["상품ID"].ne("")
+        ].copy()
+
+        if not purchase_amount_df.empty:
+            amount_df = (
+                purchase_amount_df.pivot_table(
+                    index="상품ID",
+                    columns="원가구분",
+                    values="금액",
+                    aggfunc="sum",
+                    fill_value=0,
+                )
+                .reset_index()
+                .rename_axis(None, axis=1)
+            )
+
+            for column in PURCHASE_AMOUNT_COLUMNS:
+                if column not in amount_df.columns:
+                    amount_df[column] = 0
+
+            final_df = final_df.drop(columns=PURCHASE_AMOUNT_COLUMNS)
+            final_df["_상품ID_lookup"] = final_df["상품ID"].astype(str).str.strip()
+            amount_df["_상품ID_lookup"] = amount_df["상품ID"].astype(str).str.strip()
+            amount_df = amount_df[["_상품ID_lookup", *PURCHASE_AMOUNT_COLUMNS]]
+            final_df = final_df.merge(amount_df, on="_상품ID_lookup", how="left")
+            final_df = final_df.drop(columns=["_상품ID_lookup"])
+
+            for column in PURCHASE_AMOUNT_COLUMNS:
+                final_df[column] = pd.to_numeric(
+                    final_df[column], errors="coerce"
+                ).fillna(0)
+
+    waste_resource_frames = []
+
+    for sheet_name, df in purchase_cost_sheet_dfs.items():
+        if not str(sheet_name).startswith(WASTE_RESOURCE_COLUMN):
+            continue
+
+        if df is None or df.empty or "상품ID" not in df.columns:
+            continue
+
+        amount_column = next(
+            (column for column in WASTE_RESOURCE_AMOUNT_COLUMNS if column in df.columns),
+            None,
+        )
+
+        if amount_column is None:
+            continue
+
+        selected_columns = ["상품ID", amount_column]
+        if "제외대상" in df.columns:
+            selected_columns.append("제외대상")
+
+        temp = df[selected_columns].copy()
+        if "제외대상" in temp.columns:
+            temp = temp[~_is_flag_one(temp["제외대상"])].copy()
+
+        temp = temp.rename(columns={amount_column: "_폐자원공제_원천금액"})
+        waste_resource_frames.append(temp)
+
+    if waste_resource_frames:
+        waste_resource_df = pd.concat(waste_resource_frames, ignore_index=True)
+        waste_resource_df["상품ID"] = waste_resource_df["상품ID"].astype(str).str.strip()
+        waste_resource_df[WASTE_RESOURCE_COLUMN] = -pd.to_numeric(
+            waste_resource_df["_폐자원공제_원천금액"], errors="coerce"
+        ).fillna(0).abs()
+        waste_resource_df = waste_resource_df[waste_resource_df["상품ID"].ne("")].copy()
+
+        if not waste_resource_df.empty:
+            waste_amount_df = (
+                waste_resource_df.groupby("상품ID", as_index=False)[WASTE_RESOURCE_COLUMN]
+                .sum()
+            )
+
+            final_df = final_df.drop(columns=[WASTE_RESOURCE_COLUMN])
+            final_df["_상품ID_lookup"] = final_df["상품ID"].astype(str).str.strip()
+            waste_amount_df["_상품ID_lookup"] = (
+                waste_amount_df["상품ID"].astype(str).str.strip()
+            )
+            waste_amount_df = waste_amount_df[["_상품ID_lookup", WASTE_RESOURCE_COLUMN]]
+            final_df = final_df.merge(waste_amount_df, on="_상품ID_lookup", how="left")
+            final_df = final_df.drop(columns=["_상품ID_lookup"])
+
+    payback_return_frames = []
+
+    for sheet_name, df in purchase_cost_sheet_dfs.items():
+        if not str(sheet_name).startswith("페이백"):
+            continue
+
+        if df is None or df.empty or "상품ID" not in df.columns:
+            continue
+
+        amount_column = next(
+            (column for column in PAYBACK_RETURN_AMOUNT_COLUMNS if column in df.columns),
+            None,
+        )
+
+        if amount_column is None:
+            continue
+
+        temp = df[["상품ID", amount_column]].copy()
+        temp = temp.rename(columns={amount_column: PAYBACK_RETURN_COLUMN})
+        payback_return_frames.append(temp)
+
+    if payback_return_frames:
+        payback_return_df = pd.concat(payback_return_frames, ignore_index=True)
+        payback_return_df["상품ID"] = payback_return_df["상품ID"].astype(str).str.strip()
+        payback_return_df[PAYBACK_RETURN_COLUMN] = -pd.to_numeric(
+            payback_return_df[PAYBACK_RETURN_COLUMN], errors="coerce"
+        ).fillna(0).abs()
+        payback_return_df = payback_return_df[payback_return_df["상품ID"].ne("")].copy()
+
+        if not payback_return_df.empty:
+            payback_return_amount_df = (
+                payback_return_df.groupby("상품ID", as_index=False)[PAYBACK_RETURN_COLUMN]
+                .sum()
+            )
+
+            final_df = final_df.drop(columns=[PAYBACK_RETURN_COLUMN])
+            final_df["_상품ID_lookup"] = final_df["상품ID"].astype(str).str.strip()
+            payback_return_amount_df["_상품ID_lookup"] = (
+                payback_return_amount_df["상품ID"].astype(str).str.strip()
+            )
+            payback_return_amount_df = payback_return_amount_df[
+                ["_상품ID_lookup", PAYBACK_RETURN_COLUMN]
+            ]
+            final_df = final_df.merge(
+                payback_return_amount_df, on="_상품ID_lookup", how="left"
+            )
+            final_df = final_df.drop(columns=["_상품ID_lookup"])
+
+    for column in FINAL_COST_AMOUNT_COLUMNS:
+        final_df[column] = pd.to_numeric(final_df[column], errors="coerce").fillna(0)
+
+    if "당사/타사" in final_df.columns:
+        own_vehicle_rows = final_df["당사/타사"].astype(str).str.strip().eq("당사차량")
+        final_df.loc[~own_vehicle_rows, FINAL_COST_AMOUNT_COLUMNS] = 0
+
+    difference_total = 0
+    for column in DIFFERENCE_SOURCE_COST_COLUMNS:
+        ledger_total = product_ledger_cost_totals.get(column, 0)
+        final_total = (
+            pd.to_numeric(final_df[column], errors="coerce").fillna(0).sum()
+            if column in final_df.columns
+            else 0
+        )
+        difference_total += ledger_total - final_total
+
+    if (
+        "당사/타사" in final_df.columns
+        and "정상입고" in final_df.columns
+        and difference_total != 0
+    ):
+        normal_inbound_rows = pd.to_numeric(
+            final_df["정상입고"], errors="coerce"
+        ).fillna(0).eq(1)
+        allocation_rows = own_vehicle_rows & normal_inbound_rows
+        allocation_count = int(allocation_rows.sum())
+
+        if allocation_count > 0:
+            allocation_value = round(difference_total / allocation_count)
+            final_df.loc[allocation_rows, DIFFERENCE_ALLOCATION_COLUMN] = allocation_value
+
+            allocated_total = allocation_value * allocation_count
+            remainder = difference_total - allocated_total
+            if remainder != 0:
+                first_index = final_df.index[allocation_rows][0]
+                final_df.loc[first_index, DIFFERENCE_ALLOCATION_COLUMN] += remainder
+
+    payback_unreturned_total = (
+        product_ledger_cost_totals.get(PAYBACK_RETURN_COLUMN, 0)
+        - pd.to_numeric(final_df[PAYBACK_RETURN_COLUMN], errors="coerce").fillna(0).sum()
+        + product_ledger_cost_totals.get(PAYBACK_UNRETURNED_COLUMN, 0)
+    )
+
+    if (
+        "분류1" in final_df.columns
+        and "정상입고" in final_df.columns
+        and payback_unreturned_total != 0
+    ):
+        gift_rows = final_df["분류1"].astype(str).str.strip().eq("선물")
+        normal_inbound_rows = pd.to_numeric(
+            final_df["정상입고"], errors="coerce"
+        ).fillna(0).eq(1)
+        allocation_rows = gift_rows & normal_inbound_rows
+        allocation_count = int(allocation_rows.sum())
+
+        if allocation_count > 0:
+            allocation_value = round(payback_unreturned_total / allocation_count)
+            final_df.loc[allocation_rows, PAYBACK_UNRETURNED_COLUMN] = allocation_value
+
+            allocated_total = allocation_value * allocation_count
+            remainder = payback_unreturned_total - allocated_total
+            if remainder != 0:
+                first_index = final_df.index[allocation_rows][0]
+                final_df.loc[first_index, PAYBACK_UNRETURNED_COLUMN] += remainder
+
+    excess_driving_total = product_ledger_cost_totals.get(EXCESS_DRIVING_COLUMN, 0)
+
+    if (
+        "분류1" in final_df.columns
+        and "정상입고" in final_df.columns
+        and excess_driving_total != 0
+    ):
+        gift_rows = final_df["분류1"].astype(str).str.strip().eq("선물")
+        normal_inbound_rows = pd.to_numeric(
+            final_df["정상입고"], errors="coerce"
+        ).fillna(0).eq(1)
+        allocation_rows = gift_rows & normal_inbound_rows
+        allocation_count = int(allocation_rows.sum())
+
+        if allocation_count > 0:
+            allocation_value = round(excess_driving_total / allocation_count)
+            final_df.loc[allocation_rows, EXCESS_DRIVING_COLUMN] = allocation_value
+
+            allocated_total = allocation_value * allocation_count
+            remainder = excess_driving_total - allocated_total
+            if remainder != 0:
+                first_index = final_df.index[allocation_rows][0]
+                final_df.loc[first_index, EXCESS_DRIVING_COLUMN] += remainder
+
+    tail_columns = [
+        column
+        for column in [
+            *PURCHASE_AMOUNT_COLUMNS,
+            WASTE_RESOURCE_COLUMN,
+            DIFFERENCE_ALLOCATION_COLUMN,
+            PAYBACK_RETURN_COLUMN,
+            PAYBACK_UNRETURNED_COLUMN,
+            EXCESS_DRIVING_COLUMN,
+        ]
+        if column in final_df.columns
+    ]
+    base_columns = [column for column in final_df.columns if column not in tail_columns]
+    final_df = final_df[base_columns + tail_columns]
+
+    return final_df
+
+
+def render_final_cost(product_id_df, purchase_cost_sheet_dfs):
+    st.header("4️⃣ 최종 원가 생성")
+
+    final_cost_df = build_final_cost_df(product_id_df, purchase_cost_sheet_dfs)
+
+    if final_cost_df.empty:
+        st.info("1번 기초 DB 데이터를 업로드하면 최종 원가 초안이 생성됩니다.")
+        return final_cost_df
+
+    if not purchase_cost_sheet_dfs:
+        st.info("2-1 매입원가의 상품원장 데이터를 업로드하면 금액 컬럼이 채워집니다.")
+
+    st.download_button(
+        "최종 원가 초안 다운로드",
+        data=dataframe_to_excel_bytes(final_cost_df, sheet_name="최종원가초안"),
+        file_name="final_cost_draft.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    st.write(f"건수: {len(final_cost_df):,}건")
+    st.dataframe(dataframe_for_display(final_cost_df), width='stretch')
+
+    return final_cost_df
+
+
 with tab1:
     st.write("준비 중")
 
@@ -1176,13 +1817,18 @@ with tab2:
 
     st.divider()
     st.header("2️⃣ 원가")
-    render_purchase_cost_upload(product_id_df, dfs, settlement_year, settlement_month)
+    purchase_cost_sheet_dfs = render_purchase_cost_upload(
+        product_id_df,
+        dfs,
+        settlement_year,
+        settlement_month,
+    )
 
     st.divider()
-    render_manufacturing_cost_upload()
+    render_manufacturing_cost_upload(product_id_df, settlement_year, settlement_month)
 
     st.divider()
     st.header("3️⃣ 원가동인")
 
     st.divider()
-    st.header("4️⃣ 최종 원가 생성")
+    render_final_cost(product_id_df, purchase_cost_sheet_dfs)

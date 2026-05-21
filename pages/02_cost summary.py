@@ -1109,12 +1109,17 @@ def render_final_cost(
             ordered += [c for c in display_diag.columns if c not in ordered]
             display_diag = display_diag[ordered]
 
-            # 금액 컬럼: 정수, 천단위 콤마
-            for col in ["배부총액(분자)", "실제배부값합", "가중치합(분모)"]:
+            # 금액 컬럼(분자/실제배부값): 정수, 천단위 콤마
+            for col in ["배부총액(분자)", "실제배부값합"]:
                 if col in display_diag.columns:
                     display_diag[col] = display_diag[col].apply(
                         lambda v: f"{round(v):,}" if isinstance(v, (int, float)) else v
                     )
+            # 가중치합(분모): 실제 계산에 쓰는 소수값 그대로 표시 (라운드하면 단가 검산이 안 맞음)
+            if "가중치합(분모)" in display_diag.columns:
+                display_diag["가중치합(분모)"] = display_diag["가중치합(분모)"].apply(
+                    lambda v: (f"{v:,.4f}".rstrip("0").rstrip(".") if isinstance(v, (int, float)) else v)
+                )
             # 단가: 소수점 유지 (배부 비율이라 정밀도 필요)
             if "단가" in display_diag.columns:
                 display_diag["단가"] = display_diag["단가"].apply(

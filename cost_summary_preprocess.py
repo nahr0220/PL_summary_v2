@@ -78,6 +78,9 @@ PAYBACK_RETURN_AMOUNT_COLUMNS = ["선수수익(VAT外)", "선수수익(VAT외)",
 
 MATERIAL_SALES_COLUMNS = ["정비매출", "사내매출", "위탁매출"]
 
+# 재료비 시트 금액 컬럼 후보 (시트마다 표기가 다를 수 있음)
+MATERIAL_COST_AMOUNT_COLUMNS = ["금액", "출고금액", "출고가액", "원가", "재료비"]
+
 # 기초 DB DataFrame 키
 BASE_DF_KEYS = [
     "매입조회", "검사매출", "정비매출",
@@ -971,10 +974,162 @@ def _get_row_sales_count(row, sales_type, sales_count_lookup):
     )
 
 
+def _build_direct_expense_sales_count_lookup(detail_df):
+    """직접경비 전용: 매출구분 × {신번호, 구번호, 상품ID} → 카운트.
+
+    직접경비는 차량번호 컬럼 하나만 있으므로, 차량번호를 신번호/구번호 양쪽과
+    매칭하고 상품아이디를 상품ID 와도 매칭하기 위한 lookup.
+    """
+    lookup = {
+        sales_type: {"신번호": {}, "구번호": {}, "상품ID": {}}
+        for sales_type in MATERIAL_SALES_COLUMNS
+    }
+    if detail_df is None or detail_df.empty:
+        return lookup
+
+    detail = _strip_columns(detail_df)
+    if "매출구분" not in detail.columns:
+        return lookup
+
+    detail = detail.copy()
+    detail["매출구분"] = detail["매출구분"].astype(str).str.strip()
+    if "신번호" in detail.columns:
+        detail["_신번호_lookup"] = detail["신번호"].apply(_normalize_lookup_value)
+    else:
+        detail["_신번호_lookup"] = ""
+    if "구번호" in detail.columns:
+        detail["_구번호_lookup"] = detail["구번호"].apply(_normalize_lookup_value)
+    else:
+        detail["_구번호_lookup"] = ""
+    if "상품ID" in detail.columns:
+        detail["_상품ID_lookup"] = detail["상품ID"].apply(_normalize_lookup_value)
+    else:
+        detail["_상품ID_lookup"] = ""
+
+    for sales_type in MATERIAL_SALES_COLUMNS:
+        sales_rows = detail[detail["매출구분"].eq(sales_type)]
+        lookup[sales_type]["신번호"] = (
+            sales_rows.loc[sales_rows["_신번호_lookup"] != "", "_신번호_lookup"]
+            .value_counts().to_dict()
+        )
+        lookup[sales_type]["구번호"] = (
+            sales_rows.loc[sales_rows["_구번호_lookup"] != "", "_구번호_lookup"]
+            .value_counts().to_dict()
+        )
+        lookup[sales_type]["상품ID"] = (
+            sales_rows.loc[sales_rows["_상품ID_lookup"] != "", "_상품ID_lookup"]
+            .value_counts().to_dict()
+        )
+
+    return lookup
+
+
+def _get_direct_expense_sales_count(
+    sales_type, lookup, car_number, source_product_id,
+):
+    """직접경비 행의 매출구분 카운트.
+
+    = (차량번호 ↔ 신번호 카운트)
+    + (차량번호 ↔ 구번호 카운트)
+    + (상품아이디 ↔ 상품ID 카운트)
+    """
+    car_key = _normalize_lookup_value(car_number)
+    product_key = _normalize_lookup_value(source_product_id)
+    counts = lookup[sales_type]
+    return (
+        counts["신번호"].get(car_key, 0)
+        + counts["구번호"].get(car_key, 0)
+        + counts["상품ID"].get(product_key, 0)
+    )
+
+
+def _build_segment_to_product_id_lookups(detail_df):
+    """detail_df (product_id_df) 에서 다음 두 dict 반환.
+
+    new_lookup: {매출구분}_{신번호} → 상품ID
+    old_lookup: {매출구분}_{구번호} → 상품ID
+    """
+    new_lookup = {}
+    old_lookup = {}
+    if detail_df is None or detail_df.empty:
+        return new_lookup, old_lookup
+
+    detail = _strip_columns(detail_df)
+    if "매출구분" not in detail.columns or "상품ID" not in detail.columns:
+        return new_lookup, old_lookup
+
+    detail = detail.copy()
+    detail["_매출구분"] = detail["매출구분"].astype(str).str.strip()
+    detail["_상품ID"] = detail["상품ID"].astype(str).str.strip()
+    detail = detail[detail["_매출구분"].ne("") & detail["_상품ID"].ne("")]
+
+    if "신번호" in detail.columns:
+        for _, row in detail.iterrows():
+            new_no = _normalize_lookup_value(row["신번호"])
+            if new_no:
+                key = f"{row['_매출구분']}_{new_no}"
+                # 먼저 본 값을 유지 (중복 시 첫 매칭 우선)
+                new_lookup.setdefault(key, row["_상품ID"])
+
+    if "구번호" in detail.columns:
+        for _, row in detail.iterrows():
+            old_no = _normalize_lookup_value(row["구번호"])
+            if old_no:
+                key = f"{row['_매출구분']}_{old_no}"
+                old_lookup.setdefault(key, row["_상품ID"])
+
+    return new_lookup, old_lookup
+
+
+def _build_sales_type_product_id_lookup(detail_df):
+    """detail_df 에서 {매출구분}_{상품ID} → 상품ID lookup 반환."""
+    lookup = {}
+    if detail_df is None or detail_df.empty:
+        return lookup
+
+    detail = _strip_columns(detail_df)
+    if "매출구분" not in detail.columns or "상품ID" not in detail.columns:
+        return lookup
+
+    detail = detail.copy()
+    detail["_매출구분"] = detail["매출구분"].astype(str).str.strip()
+    detail["_상품ID"] = detail["상품ID"].apply(_normalize_lookup_value)
+    detail = detail[detail["_매출구분"].ne("") & detail["_상품ID"].ne("")]
+
+    for _, row in detail.iterrows():
+        key = f"{row['_매출구분']}_{row['_상품ID']}"
+        lookup.setdefault(key, row["_상품ID"])
+
+    return lookup
+
+
+def _build_product_id_to_sales_type_lookup(detail_df):
+    """detail_df 에서 상품ID → 매출구분 lookup 반환."""
+    lookup = {}
+    if detail_df is None or detail_df.empty:
+        return lookup
+
+    detail = _strip_columns(detail_df)
+    if "매출구분" not in detail.columns or "상품ID" not in detail.columns:
+        return lookup
+
+    detail = detail.copy()
+    detail["_매출구분"] = detail["매출구분"].astype(str).str.strip()
+    detail["_상품ID"] = detail["상품ID"].apply(_normalize_lookup_value)
+    detail = detail[detail["_매출구분"].ne("") & detail["_상품ID"].ne("")]
+
+    for _, row in detail.iterrows():
+        lookup.setdefault(row["_상품ID"], row["_매출구분"])
+
+    return lookup
+
+
 def preprocess_material_cost_file(file, detail_df=None):
     """재료비"""
     sheets = _load_excel_sheets(file)
     sales_count_lookup = _build_vehicle_sales_count_lookup(detail_df)
+    # 재료비 시트의 '구분자' (= 매출구분_차량번호) 로 상품ID 찾기 위한 lookup
+    new_no_lookup, old_no_lookup = _build_segment_to_product_id_lookups(detail_df)
 
     processed_sheets = {}
     for sheet_name, df in sheets.items():
@@ -995,8 +1150,8 @@ def preprocess_material_cost_file(file, detail_df=None):
             )
 
         df["매출구분"] = np.select(
-            [df["정비매출"].gt(0), df["사내매출"].gt(0), df["위탁매출"].gt(0)],
-            ["정비매출", "사내매출", "위탁매출"],
+            [df["정비매출"].gt(0), df["위탁매출"].gt(0), df["사내매출"].gt(0)],
+            ["정비매출", "위탁매출", "사내매출"],
             default="",
         )
 
@@ -1011,16 +1166,36 @@ def preprocess_material_cost_file(file, detail_df=None):
             "",
         )
 
+        # 상품ID 매핑: 구분자 (매출구분_신번호) 로 lookup, 없으면 (매출구분_구번호) 로 재시도
+        product_id_cache = {}
+        product_ids = []
+        for segment_key in df["구분자"]:
+            key = str(segment_key).strip() if pd.notna(segment_key) else ""
+            if not key:
+                product_ids.append("")
+                continue
+            if key not in product_id_cache:
+                pid = new_no_lookup.get(key, "")
+                if not pid:
+                    pid = old_no_lookup.get(key, "")
+                product_id_cache[key] = pid
+            product_ids.append(product_id_cache[key])
+        df["상품ID"] = product_ids
+
         processed_sheets[sheet_name] = df
 
     return processed_sheets
 
 
 # 배부대상 매핑 (적요 키워드 → 배부대상)
+# 주의: 위에서부터 먼저 매칭됨(np.select). '정비판금파트' 는 '판금파트'/'정비파트' 를
+#       부분 문자열로 포함하므로 반드시 그 두 규칙보다 위에 둬야 정비로 매칭된다.
 _ALLOCATION_TARGET_RULES = [
     ("RQI", "RQI"),
+    ("임차", "임차"),
     ("반납운영팀", "선물"),
     ("공정지원팀", "전체"),
+    ("정비판금파트", "정비"),
     ("도장파트", "도장"),
     ("판금파트", "판금"),
     ("정비파트", "정비"),
@@ -1069,11 +1244,94 @@ def preprocess_combined_manufacturing_cost_files(
     return df.reset_index(drop=True)
 
 
-def preprocess_direct_expense_file(file):
+def preprocess_direct_expense_file(file, detail_df=None):
     """직접경비"""
     sheets = _load_excel_sheets(file)
+    sales_count_lookup = _build_direct_expense_sales_count_lookup(detail_df)
+    new_no_lookup, old_no_lookup = _build_segment_to_product_id_lookups(detail_df)
+    product_id_lookup = _build_sales_type_product_id_lookup(detail_df)
+    sales_type_by_product_id = _build_product_id_to_sales_type_lookup(detail_df)
+
     processed_sheets = {}
     for sheet_name, df in sheets.items():
+        # 원본 상품아이디/차량아이디 컬럼은 그대로 두고, 최종 매칭용 상품ID는 뒤에서 새로 만든다.
+        source_product_id_column = next(
+            (column for column in ["상품아이디", "차량아이디", "상품ID"] if column in df.columns),
+            None,
+        )
         df = _set_accounting_year_month(df, "매입일")
+
+        vehicle_numbers = (
+            df["차량번호"].apply(lambda v: "" if pd.isna(v) else str(v).strip())
+            if "차량번호" in df.columns
+            else pd.Series([""] * len(df), index=df.index)
+        )
+        source_product_ids = (
+            df[source_product_id_column].apply(lambda v: "" if pd.isna(v) else str(v).strip())
+            if source_product_id_column is not None
+            else pd.Series([""] * len(df), index=df.index)
+        )
+
+        # 매출구분 카운트: 차량번호 ↔ 신번호/구번호 + 상품아이디 ↔ 상품ID 3개 합산
+        for sales_type in MATERIAL_SALES_COLUMNS:
+            df[sales_type] = [
+                _get_direct_expense_sales_count(
+                    sales_type, sales_count_lookup, car_number, product_id,
+                )
+                for car_number, product_id in zip(vehicle_numbers, source_product_ids)
+            ]
+
+        df["매출구분"] = np.select(
+            [df["정비매출"].gt(0), df["위탁매출"].gt(0), df["사내매출"].gt(0)],
+            ["정비매출", "위탁매출", "사내매출"],
+            default="",
+        )
+        fallback_sales_type = source_product_ids.apply(
+            lambda value: sales_type_by_product_id.get(_normalize_lookup_value(value), "")
+        )
+        df["매출구분"] = df["매출구분"].where(
+            df["매출구분"].astype(str).str.strip().ne(""),
+            fallback_sales_type,
+        )
+
+        sales_type_series = df["매출구분"].astype(str).str.strip()
+
+        df["구분자1"] = np.where(
+            sales_type_series.ne("") & vehicle_numbers.ne(""),
+            sales_type_series + "_" + vehicle_numbers,
+            "",
+        )
+        df["구분자2"] = np.where(
+            sales_type_series.ne("") & source_product_ids.ne(""),
+            sales_type_series + "_" + source_product_ids.apply(_normalize_lookup_value),
+            "",
+        )
+
+        product_id_cache = {}
+        product_ids = []
+        for segment_key_1, segment_key_2 in zip(df["구분자1"], df["구분자2"]):
+            key_1 = str(segment_key_1).strip() if pd.notna(segment_key_1) else ""
+            key_2 = str(segment_key_2).strip() if pd.notna(segment_key_2) else ""
+            cache_key = (key_1, key_2)
+            if cache_key not in product_id_cache:
+                product_id = ""
+                if key_1:
+                    product_id = new_no_lookup.get(key_1, "")
+                    if not product_id:
+                        product_id = old_no_lookup.get(key_1, "")
+                if not product_id and key_2:
+                    product_id = product_id_lookup.get(key_2, "")
+                product_id_cache[cache_key] = product_id
+            product_ids.append(product_id_cache[cache_key])
+        df["상품ID"] = product_ids
+
+        if "구분자2" in df.columns:
+            ordered_columns = [column for column in df.columns if column != "상품ID"]
+            insert_at = ordered_columns.index("구분자2") + 1
+            ordered_columns = (
+                ordered_columns[:insert_at] + ["상품ID"] + ordered_columns[insert_at:]
+            )
+            df = df[ordered_columns]
+
         processed_sheets[sheet_name] = df
     return processed_sheets

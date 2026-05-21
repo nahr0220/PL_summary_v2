@@ -1374,9 +1374,10 @@ def _append_total_purchase_cost_columns(final_df):
     return final_df
 
 
-def _load_master_pnl_product_id_counts():
+def _load_master_pnl_product_id_counts(settlement_year=None, settlement_month=None):
     """코드와 같은 위치의 master_pnl.xlsx 에서 상품ID별 개수 반환.
 
+    판매연도==결산연도 & 판매월==결산월 인 행만 카운트한다.
     반환: {상품ID: 개수}. 파일 없거나 상품ID 컬럼 없으면 {}.
     """
     import os
@@ -1400,6 +1401,28 @@ def _load_master_pnl_product_id_counts():
         None,
     )
     if id_column is None:
+        return {}
+
+    # 판매연도/판매월 필터 (결산연/월과 동일한 행만)
+    if settlement_year is not None:
+        year_column = next(
+            (c for c in ["판매연도", "판매년도", "매출연도", "매출년도", "연도", "년도"]
+             if c in df.columns),
+            None,
+        )
+        if year_column is not None:
+            year_values = pd.to_numeric(df[year_column], errors="coerce")
+            df = df[year_values.eq(int(settlement_year))]
+    if settlement_month is not None:
+        month_column = next(
+            (c for c in ["판매월", "매출월", "월"] if c in df.columns),
+            None,
+        )
+        if month_column is not None:
+            month_values = pd.to_numeric(df[month_column], errors="coerce")
+            df = df[month_values.eq(int(settlement_month))]
+
+    if df.empty:
         return {}
 
     ids = df[id_column].astype(str).str.strip()
@@ -1445,7 +1468,7 @@ def _build_consignment_outbound_counts(consignment_ledger_df, settlement_month):
 
 def _append_inventory_quantity_amount_columns(
     final_df, inventory_df, purchase_cost_sheet_dfs, settlement_month,
-    consignment_ledger_df=None,
+    consignment_ledger_df=None, settlement_year=None,
 ):
     """수량/금액 묶음 + 출고/기말 컬럼 부여.
 
@@ -1569,7 +1592,9 @@ def _append_inventory_quantity_amount_columns(
     )
 
     # (a) master_pnl 상품ID 개수
-    master_count_map = _load_master_pnl_product_id_counts()
+    master_count_map = _load_master_pnl_product_id_counts(
+        settlement_year=settlement_year, settlement_month=settlement_month,
+    )
     master_qty = product_id_series.map(master_count_map).fillna(0).astype(float)
 
     # (b) 위탁수불부 출고==1 개수
@@ -1778,6 +1803,7 @@ def _reorder_final_columns(
     final_df = _append_inventory_quantity_amount_columns(
         final_df, inventory_df, purchase_cost_sheet_dfs, settlement_month,
         consignment_ledger_df=consignment_ledger_df,
+        settlement_year=settlement_year,
     )
 
     tail_columns = [

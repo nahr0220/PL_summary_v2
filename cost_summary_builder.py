@@ -15,6 +15,14 @@ import re
 import numpy as np
 import pandas as pd
 
+# 제조경비 배부 내역을 모듈 레벨에도 저장 (df.attrs 가 pandas 연산/캐시로 사라질 때 대비)
+_LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS = []
+
+
+def get_last_manufacturing_expense_diagnostics():
+    """가장 최근 build 의 제조경비 배부 내역 반환 (df.attrs 백업용)."""
+    return _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS
+
 from cost_summary_preprocess import (
     # 상수
     PURCHASE_AMOUNT_COLUMNS,
@@ -750,8 +758,18 @@ def _allocate_amount_proportional_rounded(
 
 
 def _round_half_up(value):
-    """스칼라 반올림 (0.5 는 올림). 파이썬 기본 round 의 banker's rounding 회피."""
-    return int(np.floor(float(value) + 0.5))
+    """스칼라 반올림 (0.5 는 올림). 파이썬 기본 round 의 banker's rounding 회피.
+
+    부동소수점 오차(예: 8059.5 가 8059.4999.. 로 저장되어 내림되는 문제)를 피하기 위해
+    decimal 로 정확히 반올림한다.
+    """
+    from decimal import Decimal, ROUND_HALF_UP
+    try:
+        # str(float) 로 변환하면 8059.5 처럼 사람이 보는 값으로 정규화됨
+        return int(Decimal(str(float(value))).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    except Exception:
+        return int(np.floor(float(value) + 0.5))
+
 
 
 def _allocate_amount_by_rounded_unit_rate(
@@ -773,7 +791,8 @@ def _allocate_amount_by_rounded_unit_rate(
         return 0.0, 0
 
     unit_rate = _round_half_up(total_amount / weights_sum)
-    allocations = weights * unit_rate
+    # 각 행 = 가중치 × 정수단가, 행별 결과도 정수로 반올림 (0.5 올림)
+    allocations = (weights * unit_rate).apply(_round_half_up)
     # 대상 컬럼이 int dtype 이면 float 값 대입 시 에러(pandas 2.x) → float 로 캐스팅
     final_df[target_column] = pd.to_numeric(
         final_df[target_column], errors="coerce"
@@ -1733,6 +1752,9 @@ def _reorder_final_columns(
     )
     # 진단 내역을 결과 DataFrame 의 attrs 에 저장 (UI 에서 표시용)
     final_df.attrs["제조경비_배부내역"] = manufacturing_expense_diagnostics
+    # df.attrs 가 이후 연산/캐시로 사라질 수 있으므로 모듈 레벨에도 백업
+    global _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS
+    _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS = manufacturing_expense_diagnostics
 
     # 제조경비_합계 = 직접 + 임차 + 전체 + RQI + 정비 + 판금 + 도장 + 선물 + 기타배부
     manufacturing_expense_all_columns = (

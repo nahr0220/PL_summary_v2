@@ -105,6 +105,44 @@ def _apply_aggregated_amount(final_df, aggregated_df, output_column):
 # 상품원장 집계
 # ============================================================
 
+def _aggregate_ledger_by_cost_type(purchase_cost_sheet_dfs, cost_type):
+    """상품원장에서 원가구분 == cost_type 인 행의 상품ID별 (개수, 금액합) 반환.
+
+    반환: {상품ID: {"count": 개수, "amount": 금액합}}
+    """
+    result = {}
+    if not purchase_cost_sheet_dfs:
+        return result
+
+    required_columns = ["상품ID", "원가구분", "금액"]
+    frames = []
+    for sheet_name, df in purchase_cost_sheet_dfs.items():
+        if not str(sheet_name).startswith("상품원장"):
+            continue
+        if df is None or df.empty:
+            continue
+        if any(column not in df.columns for column in required_columns):
+            continue
+        frames.append(df[required_columns].copy())
+
+    if not frames:
+        return result
+
+    ledger = pd.concat(frames, ignore_index=True)
+    ledger["상품ID"] = ledger["상품ID"].astype(str).str.strip()
+    ledger["원가구분"] = ledger["원가구분"].astype(str).str.strip()
+    ledger["금액"] = pd.to_numeric(ledger["금액"], errors="coerce").fillna(0)
+
+    matched = ledger[ledger["원가구분"].eq(cost_type) & ledger["상품ID"].ne("")]
+    if matched.empty:
+        return result
+
+    grouped = matched.groupby("상품ID")["금액"].agg(["count", "sum"])
+    for product_id, row in grouped.iterrows():
+        result[product_id] = {"count": int(row["count"]), "amount": float(row["sum"])}
+    return result
+
+
 def _extract_product_ledger_aggregates(purchase_cost_sheet_dfs):
     """상품원장 시트에서 (cost_totals, transfer_in_map, purchase_amount_df) 추출."""
     required_columns = ["상품ID", "원가구분", "금액"]
@@ -1317,6 +1355,244 @@ def _append_total_purchase_cost_columns(final_df):
     return final_df
 
 
+def _load_master_pnl_product_id_counts():
+    """코드와 같은 위치의 master_pnl.xlsx 에서 상품ID별 개수 반환.
+
+    반환: {상품ID: 개수}. 파일 없거나 상품ID 컬럼 없으면 {}.
+    """
+    import os
+
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_pnl.xlsx"),
+        "master_pnl.xlsx",
+    ]
+    path = next((p for p in candidates if os.path.exists(p)), None)
+    if path is None:
+        return {}
+
+    try:
+        df = pd.read_excel(path)
+    except Exception:
+        return {}
+
+    df = _strip_columns(df)
+    id_column = next(
+        (c for c in ["상품ID", "상품아이디", "차량아이디", "CODE"] if c in df.columns),
+        None,
+    )
+    if id_column is None:
+        return {}
+
+    ids = df[id_column].astype(str).str.strip()
+    ids = ids[ids.ne("")]
+    return ids.value_counts().to_dict()
+
+
+def _build_consignment_outbound_counts(consignment_ledger_df, settlement_month):
+    """위탁수불부에서 상품ID별 출고==1 개수 반환.
+
+    출고 컬럼 후보: '{월}월출고', '{월}월출고_제외', '출고', '출고여부'
+    반환: {상품ID: 개수}
+    """
+    if consignment_ledger_df is None or consignment_ledger_df.empty:
+        return {}
+
+    df = _strip_columns(consignment_ledger_df).copy()
+    if "상품ID" not in df.columns:
+        return {}
+
+    # 출고 컬럼 후보 ('출고여부' 우선)
+    outbound_candidates = ["출고여부", "출고상태", "출고", "출고_제외"]
+    if settlement_month is not None:
+        outbound_candidates += [
+            f"{int(settlement_month)}월출고",
+            f"{int(settlement_month)}월출고_제외",
+            f"{int(settlement_month)}월_출고",
+        ]
+
+    outbound_column = next(
+        (c for c in outbound_candidates if c in df.columns), None
+    )
+    if outbound_column is None:
+        return {}
+
+    df["상품ID"] = df["상품ID"].astype(str).str.strip()
+    matched = df[_is_flag_one(df[outbound_column]) & df["상품ID"].ne("")]
+    if matched.empty:
+        return {}
+
+    return matched["상품ID"].value_counts().to_dict()
+
+
+def _append_inventory_quantity_amount_columns(
+    final_df, inventory_df, purchase_cost_sheet_dfs, settlement_month,
+    consignment_ledger_df=None,
+):
+    """수량/금액 묶음 + 출고/기말 컬럼 부여.
+
+    수량(기존 플래그 컬럼 재사용):
+        기초_수량 = 기초재고, 정상입고_수량 = 정상입고, 타처입고_수량 = 타처입고
+    금액:
+        기초_금액: 기초_수량==1 이면 기초재고 시트의 같은 상품ID 매출원가_전월
+        정상입고_금액: 당사차량이면 매입원가_당월, 아니면 0
+        타처입고_금액: 당사차량이면 상품원장(원가구분=타처입고) 같은 상품ID 금액합, 아니면 0
+        제조원가: 제조원가_당월 과 동일
+    출고:
+        자산출고_수량: 당사차량 & 상품원장(원가구분=자산출고) 같은 상품ID 개수
+        자산출고_금액: 자산출고_수량==1 이면 (기초+정상입고+타처입고+제조원가) 금액합
+        기타출고_수량/금액: 자산출고와 동일 패턴(원가구분=기타출고)
+    기말:
+        기말_수량 = 기초+정상입고+타처입고 - 정상출고 - 자산출고 - 기타출고 (수량)
+        기말_금액 = 당사차량만 (기초+정상입고+타처입고+제조원가 - 정상출고 - 자산출고 - 기타출고) 금액
+    정상출고_수량/금액: 추후 정의 (지금은 0 으로 둠)
+    """
+    n = len(final_df)
+
+    def zero():
+        return pd.Series([0.0] * n, index=final_df.index)
+
+    product_id_series = final_df["상품ID"].astype(str).str.strip()
+    own_vehicle_mask = (
+        final_df["당사/타사"].astype(str).str.strip().eq("당사차량")
+        if "당사/타사" in final_df.columns
+        else pd.Series([False] * n, index=final_df.index)
+    )
+
+    # ----- 수량 (기존 플래그 컬럼 그대로 숫자화) -----
+    qty_base = (
+        pd.to_numeric(final_df["기초재고"], errors="coerce").fillna(0)
+        if "기초재고" in final_df.columns else zero()
+    )
+    qty_normal = (
+        pd.to_numeric(final_df["정상입고"], errors="coerce").fillna(0)
+        if "정상입고" in final_df.columns else zero()
+    )
+    qty_transfer = (
+        pd.to_numeric(final_df["타처입고"], errors="coerce").fillna(0)
+        if "타처입고" in final_df.columns else zero()
+    )
+
+    final_df["기초_수량"] = qty_base
+    final_df["정상입고_수량"] = qty_normal
+    final_df["타처입고_수량"] = qty_transfer
+
+    # ----- 기초_금액: 기초_수량==1 이면 기초재고 시트의 매출원가_전월 -----
+    base_amount = zero()
+    if (
+        inventory_df is not None
+        and not inventory_df.empty
+        and "상품ID" in inventory_df.columns
+    ):
+        inv = _strip_columns(inventory_df).copy()
+        if "매출원가_전월" in inv.columns:
+            inv["상품ID"] = inv["상품ID"].astype(str).str.strip()
+            inv["매출원가_전월"] = pd.to_numeric(
+                inv["매출원가_전월"], errors="coerce"
+            ).fillna(0)
+            inv = inv[inv["상품ID"].ne("")]
+            base_cost_map = inv.groupby("상품ID")["매출원가_전월"].sum().to_dict()
+            base_amount = product_id_series.map(base_cost_map).fillna(0).astype(float)
+    base_amount = base_amount.where(qty_base.eq(1), 0)
+    final_df["기초_금액"] = base_amount
+
+    # ----- 정상입고_금액: 당사차량이면 매입원가_당월(내부명 '매입원가') -----
+    purchase_current = (
+        pd.to_numeric(final_df["매입원가"], errors="coerce").fillna(0)
+        if "매입원가" in final_df.columns else zero()
+    )
+    final_df["정상입고_금액"] = purchase_current.where(own_vehicle_mask, 0)
+
+    # ----- 타처입고_금액: 당사차량이면 상품원장(원가구분=타처입고) 금액합 -----
+    transfer_ledger = _aggregate_ledger_by_cost_type(purchase_cost_sheet_dfs, "타처입고")
+    transfer_amount_map = {pid: v["amount"] for pid, v in transfer_ledger.items()}
+    transfer_amount = product_id_series.map(transfer_amount_map).fillna(0).astype(float)
+    final_df["타처입고_금액"] = transfer_amount.where(own_vehicle_mask, 0)
+
+    # ----- 제조원가 = 제조원가_당월 -----
+    mfg_cost = (
+        pd.to_numeric(final_df["제조원가_당월"], errors="coerce").fillna(0)
+        if "제조원가_당월" in final_df.columns else zero()
+    )
+    final_df["제조원가"] = mfg_cost
+
+    # ----- 입고 금액 합 (기초+정상입고+타처입고+제조원가) -----
+    inbound_amount_sum = (
+        final_df["기초_금액"]
+        + final_df["정상입고_금액"]
+        + final_df["타처입고_금액"]
+        + final_df["제조원가"]
+    )
+
+    # ----- 자산출고 -----
+    asset_ledger = _aggregate_ledger_by_cost_type(purchase_cost_sheet_dfs, "자산출고")
+    asset_count_map = {pid: v["count"] for pid, v in asset_ledger.items()}
+    asset_qty = product_id_series.map(asset_count_map).fillna(0).astype(float)
+    asset_qty = asset_qty.where(own_vehicle_mask, 0)
+    final_df["자산출고_수량"] = asset_qty
+    final_df["자산출고_금액"] = inbound_amount_sum.where(asset_qty.eq(1), 0)
+
+    # ----- 기타출고 -----
+    etc_ledger = _aggregate_ledger_by_cost_type(purchase_cost_sheet_dfs, "기타출고")
+    etc_count_map = {pid: v["count"] for pid, v in etc_ledger.items()}
+    etc_qty = product_id_series.map(etc_count_map).fillna(0).astype(float)
+    etc_qty = etc_qty.where(own_vehicle_mask, 0)
+    final_df["기타출고_수량"] = etc_qty
+    final_df["기타출고_금액"] = inbound_amount_sum.where(etc_qty.eq(1), 0)
+
+    # ----- 정상출고 -----
+    # 정상출고_수량:
+    #   당사차량: master_pnl.xlsx 에서 같은 상품ID 개수
+    #   위탁매출: 위탁수불부에서 같은 상품ID 의 출고==1 개수
+    sales_type_series = (
+        final_df["매출구분"].astype(str).str.strip()
+        if "매출구분" in final_df.columns
+        else pd.Series([""] * n, index=final_df.index)
+    )
+
+    # (a) master_pnl 상품ID 개수
+    master_count_map = _load_master_pnl_product_id_counts()
+    master_qty = product_id_series.map(master_count_map).fillna(0).astype(float)
+
+    # (b) 위탁수불부 출고==1 개수
+    consignment_count_map = _build_consignment_outbound_counts(
+        consignment_ledger_df, settlement_month,
+    )
+    consignment_qty = product_id_series.map(consignment_count_map).fillna(0).astype(float)
+
+    consignment_sales_mask = sales_type_series.eq("위탁매출")
+    normal_out_qty = pd.Series([0.0] * n, index=final_df.index)
+    # 당사차량 → master_pnl 개수
+    normal_out_qty = normal_out_qty.where(~own_vehicle_mask, master_qty)
+    # 위탁매출 → 위탁수불부 출고 개수 (당사차량이 아닌 위탁매출에 적용)
+    normal_out_qty = normal_out_qty.where(
+        ~(consignment_sales_mask & ~own_vehicle_mask), consignment_qty
+    )
+    final_df["정상출고_수량"] = normal_out_qty
+
+    # 정상출고_금액: 정상출고_수량==1 이면 입고금액합
+    final_df["정상출고_금액"] = inbound_amount_sum.where(normal_out_qty.eq(1), 0)
+
+    normal_out_qty = pd.to_numeric(final_df["정상출고_수량"], errors="coerce").fillna(0)
+    normal_out_amount = pd.to_numeric(final_df["정상출고_금액"], errors="coerce").fillna(0)
+
+    # ----- 기말_수량 = 기초+정상입고+타처입고 - 정상출고 - 자산출고 - 기타출고 -----
+    final_df["기말_수량"] = (
+        qty_base + qty_normal + qty_transfer
+        - normal_out_qty - asset_qty - etc_qty
+    )
+
+    # ----- 기말_금액 = 당사차량만 (입고금액합 - 정상출고 - 자산출고 - 기타출고) -----
+    ending_amount = (
+        inbound_amount_sum
+        - normal_out_amount
+        - final_df["자산출고_금액"]
+        - final_df["기타출고_금액"]
+    )
+    final_df["기말_금액"] = ending_amount.where(own_vehicle_mask, 0)
+
+    return final_df
+
+
 def _append_cost_group_cumulative_columns(
     final_df, inventory_df, settlement_month,
 ):
@@ -1419,6 +1695,8 @@ def _reorder_final_columns(
     cost_driver_dfs=None,
     combined_cost_driver_df=None,
     inventory_df=None,
+    purchase_cost_sheet_dfs=None,
+    consignment_ledger_df=None,
 ):
     """매입원가 + 항목별 [합계, 전월, 당월] + 재료비 + 원가동인 + 공정별 컬럼 정렬.
 
@@ -1474,6 +1752,12 @@ def _reorder_final_columns(
         final_df, inventory_df, settlement_month,
     )
 
+    # 수량/금액 묶음 + 출고/기말 (제조원가_당월 이 만들어진 후)
+    final_df = _append_inventory_quantity_amount_columns(
+        final_df, inventory_df, purchase_cost_sheet_dfs, settlement_month,
+        consignment_ledger_df=consignment_ledger_df,
+    )
+
     tail_columns = [
         f"{TOTAL_PURCHASE_COST_COLUMN}_합계",
         f"{TOTAL_PURCHASE_COST_COLUMN}_전월",
@@ -1507,7 +1791,39 @@ def _reorder_final_columns(
 
     tail_columns = [c for c in tail_columns if c in final_df.columns]
     base_columns = [c for c in final_df.columns if c not in tail_columns]
-    final_df = final_df[base_columns + tail_columns]
+
+    # 수량/금액 묶음 컬럼: 원본 기초재고/정상입고/타처입고 위치에 배치하고 원본은 제거
+    inventory_block = [
+        "기초_수량", "기초_금액",
+        "정상입고_수량", "정상입고_금액",
+        "타처입고_수량", "타처입고_금액",
+        "제조원가",
+        "정상출고_수량", "정상출고_금액",
+        "자산출고_수량", "자산출고_금액",
+        "기타출고_수량", "기타출고_금액",
+        "기말_수량", "기말_금액",
+    ]
+    inventory_block = [c for c in inventory_block if c in final_df.columns]
+    original_qty_columns = ["기초재고", "정상입고", "타처입고"]
+
+    # base_columns 에서 원본 수량 컬럼 제거 + 새 묶음/중복 제거
+    base_columns = [
+        c for c in base_columns
+        if c not in original_qty_columns and c not in inventory_block
+    ]
+    # 원본 '매입월' 뒤에 inventory_block 삽입 (없으면 당사/타사 뒤, 그것도 없으면 base 끝)
+    insert_pos = len(base_columns)
+    if "매입월" in base_columns:
+        insert_pos = base_columns.index("매입월") + 1
+    elif "당사/타사" in base_columns:
+        insert_pos = base_columns.index("당사/타사") + 1
+    base_columns = (
+        base_columns[:insert_pos] + inventory_block + base_columns[insert_pos:]
+    )
+
+    ordered = base_columns + tail_columns
+    ordered = [c for c in ordered if c in final_df.columns]
+    final_df = final_df[ordered]
 
     # 최종 출력 컬럼명으로 변경 (계산은 내부 이름으로 끝났고 표시용만 rename)
     final_df = final_df.rename(columns=_build_output_column_rename_map())
@@ -1584,6 +1900,7 @@ def build_final_cost_df(
     settlement_year=None,
     cost_driver_dfs=None,
     combined_cost_driver_df=None,
+    consignment_ledger_df=None,
 ):
     final_df = product_id_df.copy()
 
@@ -1602,6 +1919,8 @@ def build_final_cost_df(
         cost_driver_dfs=cost_driver_dfs,
         combined_cost_driver_df=combined_cost_driver_df,
         inventory_df=inventory_df,
+        purchase_cost_sheet_dfs=purchase_cost_sheet_dfs,
+        consignment_ledger_df=consignment_ledger_df,
     )
 
     # 매입원가 시트가 없으면 전월 컬럼만 채우고 종료

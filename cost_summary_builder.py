@@ -1375,10 +1375,10 @@ def _append_total_purchase_cost_columns(final_df):
 
 
 def _load_master_pnl_product_id_counts(settlement_year=None, settlement_month=None):
-    """코드와 같은 위치의 master_pnl.xlsx 에서 상품ID별 개수 반환.
+    """코드와 같은 위치의 master_pnl.xlsx 에서 (상품ID, 판매연도, 판매월) 조합별 개수 반환.
 
-    판매연도==결산연도 & 판매월==결산월 인 행만 카운트한다.
-    반환: {상품ID: 개수}. 파일 없거나 상품ID 컬럼 없으면 {}.
+    반환: {(상품ID, 연, 월): 개수}. 각 상품 행의 (회계연도, 회계월) 로 매칭한다.
+    파일 없거나 상품ID 컬럼 없으면 {}.
     """
     import os
 
@@ -1403,31 +1403,31 @@ def _load_master_pnl_product_id_counts(settlement_year=None, settlement_month=No
     if id_column is None:
         return {}
 
-    # 판매연도/판매월 필터 (결산연/월과 동일한 행만)
-    if settlement_year is not None:
-        year_column = next(
-            (c for c in ["판매연도", "판매년도", "매출연도", "매출년도", "연도", "년도"]
-             if c in df.columns),
-            None,
-        )
-        if year_column is not None:
-            year_values = pd.to_numeric(df[year_column], errors="coerce")
-            df = df[year_values.eq(int(settlement_year))]
-    if settlement_month is not None:
-        month_column = next(
-            (c for c in ["판매월", "매출월", "월"] if c in df.columns),
-            None,
-        )
-        if month_column is not None:
-            month_values = pd.to_numeric(df[month_column], errors="coerce")
-            df = df[month_values.eq(int(settlement_month))]
+    year_column = next(
+        (c for c in ["판매연도", "판매년도", "매출연도", "매출년도", "연도", "년도"]
+         if c in df.columns),
+        None,
+    )
+    month_column = next(
+        (c for c in ["판매월", "판매달", "매출월", "월"] if c in df.columns),
+        None,
+    )
 
-    if df.empty:
+    work = pd.DataFrame()
+    work["상품ID"] = df[id_column].astype(str).str.strip()
+    work["연"] = pd.to_numeric(df[year_column], errors="coerce") if year_column else pd.NA
+    work["월"] = pd.to_numeric(df[month_column], errors="coerce") if month_column else pd.NA
+    work = work[work["상품ID"].ne("")]
+    if work.empty:
         return {}
 
-    ids = df[id_column].astype(str).str.strip()
-    ids = ids[ids.ne("")]
-    return ids.value_counts().to_dict()
+    result = {}
+    grouped = work.groupby(["상품ID", "연", "월"], dropna=False).size()
+    for (pid, year, month), count in grouped.items():
+        year_int = int(year) if pd.notna(year) else None
+        month_int = int(month) if pd.notna(month) else None
+        result[(pid, year_int, month_int)] = int(count)
+    return result
 
 
 def _build_consignment_outbound_counts(consignment_ledger_df, settlement_month):
@@ -1464,6 +1464,34 @@ def _build_consignment_outbound_counts(consignment_ledger_df, settlement_month):
         return {}
 
     return matched["상품ID"].value_counts().to_dict()
+
+
+def _build_consignment_outbound_status_map(consignment_ledger_df):
+    """위탁수불부에서 출고여부==1 인 행의 상품ID별 '출고상태' 값 반환.
+
+    반환: {상품ID: 출고상태값}. 같은 상품ID 가 여러 건이면 마지막 값.
+    """
+    if consignment_ledger_df is None or consignment_ledger_df.empty:
+        return {}
+
+    df = _strip_columns(consignment_ledger_df).copy()
+    if "상품ID" not in df.columns or "출고상태" not in df.columns:
+        return {}
+
+    flag_column = "출고여부" if "출고여부" in df.columns else None
+    df["상품ID"] = df["상품ID"].astype(str).str.strip()
+
+    if flag_column is not None:
+        matched = df[_is_flag_one(df[flag_column]) & df["상품ID"].ne("")]
+    else:
+        matched = df[df["상품ID"].ne("")]
+    if matched.empty:
+        return {}
+
+    result = {}
+    for _, row in matched.iterrows():
+        result[row["상품ID"]] = row["출고상태"]
+    return result
 
 
 def _append_inventory_quantity_amount_columns(
@@ -1591,11 +1619,30 @@ def _append_inventory_quantity_amount_columns(
         else pd.Series([""] * n, index=final_df.index)
     )
 
-    # (a) master_pnl 상품ID 개수
-    master_count_map = _load_master_pnl_product_id_counts(
-        settlement_year=settlement_year, settlement_month=settlement_month,
+    # (a) master_pnl 개수: 각 행의 (상품ID, 회계연도, 회계월) 로 매칭
+    master_count_map = _load_master_pnl_product_id_counts()
+    if "회계연도" in final_df.columns:
+        acct_year = pd.to_numeric(final_df["회계연도"], errors="coerce")
+    else:
+        acct_year = pd.Series([settlement_year] * n, index=final_df.index)
+    if "회계월" in final_df.columns:
+        acct_month = pd.to_numeric(final_df["회계월"], errors="coerce")
+    else:
+        acct_month = pd.Series([settlement_month] * n, index=final_df.index)
+
+    def _master_lookup(pid, yr, mo):
+        yr_int = int(yr) if pd.notna(yr) else None
+        mo_int = int(mo) if pd.notna(mo) else None
+        return master_count_map.get((str(pid).strip(), yr_int, mo_int), 0)
+
+    master_qty = pd.Series(
+        [
+            _master_lookup(pid, yr, mo)
+            for pid, yr, mo in zip(product_id_series, acct_year, acct_month)
+        ],
+        index=final_df.index,
+        dtype=float,
     )
-    master_qty = product_id_series.map(master_count_map).fillna(0).astype(float)
 
     # (b) 위탁수불부 출고==1 개수
     consignment_count_map = _build_consignment_outbound_counts(
@@ -1633,6 +1680,13 @@ def _append_inventory_quantity_amount_columns(
         - final_df["기타출고_금액"]
     )
     final_df["기말_금액"] = ending_amount.where(own_vehicle_mask, 0)
+
+    # 위탁출고구분: 위탁수불부 출고여부==1 인 행의 출고상태 값 (상품ID 매칭)
+    status_map = _build_consignment_outbound_status_map(consignment_ledger_df)
+    final_df["위탁출고구분"] = product_id_series.map(status_map)
+    final_df["위탁출고구분"] = final_df["위탁출고구분"].apply(
+        lambda v: "" if pd.isna(v) else str(v)
+    )
 
     return final_df
 
@@ -1806,6 +1860,31 @@ def _reorder_final_columns(
         settlement_year=settlement_year,
     )
 
+    # 페이백 합계 = 페이백(반납) + 페이백(미반납) (합계/전월/당월 각각)
+    for suffix_internal, suffix_label in (("_합계", "_합계"), ("_전월", "_전월"), ("", "_당월")):
+        return_col = f"{PAYBACK_RETURN_COLUMN}{suffix_internal}"      # 페이백(반납)...
+        unreturned_col = f"{PAYBACK_UNRETURNED_COLUMN}{suffix_internal}"  # 페이백(미반납)...
+        target_col = f"페이백{suffix_label}"
+        final_df[target_col] = (
+            pd.to_numeric(final_df.get(return_col, 0), errors="coerce").fillna(0)
+            + pd.to_numeric(final_df.get(unreturned_col, 0), errors="coerce").fillna(0)
+        )
+
+    # 매출원가 = 매입원가 + 제조원가 (누적합계/전월누적/당월 각각)
+    # 매입원가는 내부명: 합계=매입원가_합계, 전월누적=매입원가_전월, 당월=매입원가
+    purchase_map = {
+        "누적합계": f"{TOTAL_PURCHASE_COST_COLUMN}_합계",
+        "전월누적": f"{TOTAL_PURCHASE_COST_COLUMN}_전월",
+        "당월": TOTAL_PURCHASE_COST_COLUMN,
+    }
+    for kind in ("누적합계", "전월누적", "당월"):
+        purchase_col = purchase_map[kind]
+        mfg_col = f"제조원가_{kind}"
+        final_df[f"매출원가_{kind}"] = (
+            pd.to_numeric(final_df.get(purchase_col, 0), errors="coerce").fillna(0)
+            + pd.to_numeric(final_df.get(mfg_col, 0), errors="coerce").fillna(0)
+        )
+
     tail_columns = [
         f"{TOTAL_PURCHASE_COST_COLUMN}_합계",
         f"{TOTAL_PURCHASE_COST_COLUMN}_전월",
@@ -1816,6 +1895,9 @@ def _reorder_final_columns(
         "제조원가_당월",
     ]
     for column in FINAL_COST_MONTHLY_COLUMNS:
+        # 페이백(반납) 묶음 앞에 통합 페이백 합계/전월/당월 삽입
+        if column == PAYBACK_RETURN_COLUMN:
+            tail_columns.extend(["페이백_합계", "페이백_전월", "페이백_당월"])
         tail_columns.extend([f"{column}_합계", f"{column}_전월", column])
     # 초과운행_당월(EXCESS_DRIVING_COLUMN) 뒤: 재료비/노무비/제조경비 누적 묶음
     for group_name in ("재료비", "노무비", "제조경비"):
@@ -1824,10 +1906,11 @@ def _reorder_final_columns(
             f"{group_name}_전월누적",
             f"{group_name}_당월",
         ])
-    tail_columns.extend(["재료비_합", "재료비_직접", "재료비_배부"])
     tail_columns.extend(["rtc_일수", "sm_일수"])
     tail_columns.extend([PROCESS_CATEGORY_TOTAL_COLUMN])
     tail_columns.extend(PROCESS_CATEGORY_COLUMNS.keys())
+    # 당월_재료비(재료비_합/직접/배부)는 유효실측시간_도장(공정별_도장) 뒤에 위치
+    tail_columns.extend(["재료비_합", "재료비_직접", "재료비_배부"])
     tail_columns.extend([LABOR_COST_TOTAL_COLUMN])
     tail_columns.extend([name for name, _, _ in LABOR_COST_SPECS])
     tail_columns.extend([LABOR_COST_GIFT_COLUMN])
@@ -1850,6 +1933,9 @@ def _reorder_final_columns(
         "자산출고_수량", "자산출고_금액",
         "기타출고_수량", "기타출고_금액",
         "기말_수량", "기말_금액",
+        # 기말_금액 뒤: 위탁출고구분, 그 다음 매출원가
+        "위탁출고구분",
+        "매출원가_누적합계", "매출원가_전월누적", "매출원가_당월",
     ]
     inventory_block = [c for c in inventory_block if c in final_df.columns]
     original_qty_columns = ["기초재고", "정상입고", "타처입고"]
@@ -1871,11 +1957,91 @@ def _reorder_final_columns(
 
     ordered = base_columns + tail_columns
     ordered = [c for c in ordered if c in final_df.columns]
+
+    # 상품ID 를 선매입여부 뒤로 이동
+    if "상품ID" in ordered and "선매입여부" in ordered:
+        ordered.remove("상품ID")
+        insert_at = ordered.index("선매입여부") + 1
+        ordered.insert(insert_at, "상품ID")
+
     final_df = final_df[ordered]
 
     # 최종 출력 컬럼명으로 변경 (계산은 내부 이름으로 끝났고 표시용만 rename)
     final_df = final_df.rename(columns=_build_output_column_rename_map())
+
+    # 최종 정렬
+    final_df = _sort_final_cost_df(final_df)
     return final_df
+
+
+def _sort_final_cost_df(final_df):
+    """최종 원가 정렬.
+
+    1) 매출구분: 사내매출 > 위탁매출 > 검사매출 > 정비매출
+    2) 기초_수량==1 > 정상입고_수량==1 > 타처입고_수량==1 (해당 수량이 1인 순서)
+    3) 당사차량 → 매입일자(계산서일자) 오름차순 / 타사차량 → 반납일자 오름차순
+    """
+    if final_df.empty:
+        return final_df
+
+    df = final_df.copy()
+
+    # 1) 매출구분 우선순위
+    sales_order = {"사내매출": 0, "위탁매출": 1, "검사매출": 2, "정비매출": 3}
+    sales_key = (
+        df["매출구분"].astype(str).str.strip().map(sales_order).fillna(99)
+        if "매출구분" in df.columns
+        else pd.Series([99] * len(df), index=df.index)
+    )
+
+    # 2) 수량 우선순위: 기초==1 →0, 정상입고==1 →1, 타처입고==1 →2, 그 외 →3
+    def qty_rank(row):
+        if "기초_수량" in df.columns and pd.to_numeric(pd.Series([row.get("기초_수량", 0)]), errors="coerce").fillna(0).iloc[0] == 1:
+            return 0
+        if "정상입고_수량" in df.columns and pd.to_numeric(pd.Series([row.get("정상입고_수량", 0)]), errors="coerce").fillna(0).iloc[0] == 1:
+            return 1
+        if "타처입고_수량" in df.columns and pd.to_numeric(pd.Series([row.get("타처입고_수량", 0)]), errors="coerce").fillna(0).iloc[0] == 1:
+            return 2
+        return 3
+
+    base_q = pd.to_numeric(df.get("기초_수량", 0), errors="coerce").fillna(0)
+    normal_q = pd.to_numeric(df.get("정상입고_수량", 0), errors="coerce").fillna(0)
+    transfer_q = pd.to_numeric(df.get("타처입고_수량", 0), errors="coerce").fillna(0)
+    qty_key = pd.Series(3, index=df.index)
+    qty_key = qty_key.mask(transfer_q.eq(1), 2)
+    qty_key = qty_key.mask(normal_q.eq(1), 1)
+    qty_key = qty_key.mask(base_q.eq(1), 0)
+
+    # 3) 날짜 키: 당사차량 → 매입일자, 타사차량 → 반납일자
+    own_mask = (
+        df["당사/타사"].astype(str).str.strip().eq("당사차량")
+        if "당사/타사" in df.columns
+        else pd.Series([False] * len(df), index=df.index)
+    )
+    purchase_date = (
+        pd.to_datetime(df["매입일자"], errors="coerce")
+        if "매입일자" in df.columns
+        else pd.Series([pd.NaT] * len(df), index=df.index)
+    )
+    return_date = (
+        pd.to_datetime(df["반납일자"], errors="coerce")
+        if "반납일자" in df.columns
+        else pd.Series([pd.NaT] * len(df), index=df.index)
+    )
+    date_key = purchase_date.where(own_mask, return_date)
+
+    df["_sales_key"] = sales_key.values
+    df["_qty_key"] = qty_key.values
+    df["_date_key"] = date_key.values
+
+    df = df.sort_values(
+        by=["_sales_key", "_qty_key", "_date_key"],
+        ascending=[True, True, True],
+        na_position="last",
+        kind="stable",
+    ).drop(columns=["_sales_key", "_qty_key", "_date_key"]).reset_index(drop=True)
+
+    return df
 
 
 def _build_output_column_rename_map():

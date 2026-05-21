@@ -1146,10 +1146,355 @@ def render_final_cost(
 st.set_page_config(page_title="손익분석", layout="wide")
 st.title("Cost Summary")
 
+# 최종 마스터 저장 경로 (코드와 같은 폴더, 서버 공용)
+import os as _os
+
+MASTER_FILE_PATH = _os.path.join(
+    _os.path.dirname(_os.path.abspath(__file__)), "final_cost_master.xlsx"
+)
+MASTER_META_PATH = _os.path.join(
+    _os.path.dirname(_os.path.abspath(__file__)), "final_cost_master_meta.txt"
+)
+
+
+def save_final_master(final_cost_df):
+    """최종원가 결과를 서버 엑셀 파일로 저장 (공용). 성공 시 저장 시각 문자열 반환."""
+    saved_at = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+    with pd.ExcelWriter(MASTER_FILE_PATH, engine="openpyxl") as writer:
+        final_cost_df.to_excel(writer, index=False, sheet_name="최종원가마스터")
+    with open(MASTER_META_PATH, "w", encoding="utf-8") as f:
+        f.write(saved_at)
+    return saved_at
+
+
+def load_final_master():
+    """저장된 최종원가 결과(엑셀) 불러오기. (df, 저장시각) 또는 (None, None)."""
+    if not _os.path.exists(MASTER_FILE_PATH):
+        return None, None
+    try:
+        df = pd.read_excel(MASTER_FILE_PATH, sheet_name="최종원가마스터")
+    except Exception:
+        try:
+            df = pd.read_excel(MASTER_FILE_PATH)
+        except Exception:
+            return None, None
+    saved_at = None
+    if _os.path.exists(MASTER_META_PATH):
+        try:
+            with open(MASTER_META_PATH, "r", encoding="utf-8") as f:
+                saved_at = f.read().strip()
+        except Exception:
+            saved_at = None
+    return df, saved_at
+
+
+def delete_final_master():
+    """저장된 최종원가 마스터 파일과 메타 삭제. 삭제 성공 여부 반환."""
+    deleted = False
+    for path in (MASTER_FILE_PATH, MASTER_META_PATH):
+        try:
+            if _os.path.exists(path):
+                _os.remove(path)
+                deleted = True
+        except Exception:
+            pass
+    return deleted
+
+
+# ----- 회계처리 표 -----
+
+# 월 + 누계 컬럼 (각 항목마다 대수/금액 2개씩)
+_ACCOUNTING_MONTH_LABELS = [f"{m}월" for m in range(1, 13)] + ["누계"]
+
+# 위탁매출 거래처 목록 (이 순서대로 표시, '기타'는 나머지)
+_CONSIGNMENT_PARTNERS = [
+    "하나캐피탈", "우리금융캐피탈", "NH농협캐피탈", "삼성카드",
+    "현대캐피탈(직)", "MG캐피탈", "레드캡투어", "롯데렌탈", "현대캐피탈(플랫폼)",
+]
+# 위탁매출 거래처를 담은 컬럼 (필요시 변경)
+_CONSIGNMENT_PARTNER_COLUMN = "분류3"
+
+
+def _num(series):
+    return pd.to_numeric(series, errors="coerce").fillna(0)
+
+
+def _compute_accounting_tables(master_df):
+    """최종원가마스터에서 회계처리 표 3개의 값을 월별로 계산.
+
+    반환: {"auto": df, "sales": df, "consign": df} (각 멀티헤더 표)
+    """
+    df = master_df.copy()
+    df.columns = [str(c) for c in df.columns]
+
+    month_series = (
+        pd.to_numeric(df["회계월"], errors="coerce")
+        if "회계월" in df.columns
+        else pd.Series([pd.NA] * len(df), index=df.index)
+    )
+    sales_series = (
+        df["매출구분"].astype(str).str.strip()
+        if "매출구분" in df.columns
+        else pd.Series([""] * len(df), index=df.index)
+    )
+
+    def col(name):
+        return _num(df[name]) if name in df.columns else pd.Series([0.0] * len(df), index=df.index)
+
+    def partner_series():
+        if _CONSIGNMENT_PARTNER_COLUMN in df.columns:
+            return df[_CONSIGNMENT_PARTNER_COLUMN].astype(str).str.strip()
+        return pd.Series([""] * len(df), index=df.index)
+
+    auto_rows = [
+        ("기초재고", 0), ("당기입고", 0), ("정상입고", 1), ("타계정입고", 1), ("제조원가", 1),
+        ("당기출고", 0), ("정상출고", 1), ("자산출고", 1), ("기타출고", 1), ("기말재고", 0),
+    ]
+    auto_table = _build_accounting_table(auto_rows)
+
+    sales_rows = [
+        ("보험매출", 0), ("정비매출", 0), ("검사매출", 0), ("위탁매출", 0),
+    ] + [(p, 1) for p in _CONSIGNMENT_PARTNERS] + [("기타", 1)]
+    sales_table = _build_accounting_table(sales_rows)
+
+    consign_rows = [
+        ("기초재고", 0), ("제조원가", 1),
+        ("당기입고", 0), ("제조원가", 1),
+        ("당기출고", 0), ("매출원가", 1), ("위탁판매", 2), ("위탁매입", 2), ("위탁취소", 2),
+        ("기말재고", 0),
+    ]
+    consign_table = _build_accounting_table(consign_rows)
+
+    for month_label in _ACCOUNTING_MONTH_LABELS:
+        if month_label == "누계":
+            month_mask = pd.Series([True] * len(df), index=df.index)
+        else:
+            m = int(month_label.replace("월", ""))
+            month_mask = month_series.eq(m)
+
+        in_house = month_mask & sales_series.eq("사내매출")
+        consign_m = month_mask & sales_series.eq("위탁매출")
+
+        def s(mask, name):
+            return float(col(name)[mask].sum())
+
+        # ① 자동차 수불 (사내매출)
+        base_q = s(in_house, "기초_수량"); base_a = s(in_house, "기초_금액")
+        normal_in_q = s(in_house, "정상입고_수량"); normal_in_a = s(in_house, "정상입고_금액")
+        transfer_in_q = s(in_house, "타처입고_수량"); transfer_in_a = s(in_house, "타처입고_금액")
+        mfg_a = s(month_mask, "제조원가_당월")
+        in_q = normal_in_q + transfer_in_q
+        in_a = normal_in_a + transfer_in_a + mfg_a
+        normal_out_q = s(in_house, "정상출고_수량"); normal_out_a = s(in_house, "정상출고_금액")
+        asset_out_q = s(in_house, "자산출고_수량"); asset_out_a = s(in_house, "자산출고_금액")
+        etc_out_q = s(in_house, "기타출고_수량"); etc_out_a = s(in_house, "기타출고_금액")
+        out_q = normal_out_q + asset_out_q + etc_out_q
+        out_a = normal_out_a + asset_out_a + etc_out_a
+        end_q = base_q + in_q - out_q
+        end_a = base_a + in_a - out_a
+
+        auto_values = {
+            "기초재고": (base_q, base_a),
+            "당기입고": (in_q, in_a),
+            "정상입고": (normal_in_q, normal_in_a),
+            "타계정입고": (transfer_in_q, transfer_in_a),
+            "제조원가": (0, mfg_a),
+            "당기출고": (out_q, out_a),
+            "정상출고": (normal_out_q, normal_out_a),
+            "자산출고": (asset_out_q, asset_out_a),
+            "기타출고": (etc_out_q, etc_out_a),
+            "기말재고": (end_q, end_a),
+        }
+        col_q = auto_table.columns.get_loc((month_label, "대수"))
+        col_a = auto_table.columns.get_loc((month_label, "금액"))
+        for row_pos, (name, level) in enumerate(auto_rows):
+            q, a = auto_values[name]
+            auto_table.iloc[row_pos, col_q] = q
+            auto_table.iloc[row_pos, col_a] = a
+
+        # ② 매출구분별
+        def sales_count_amount(mask):
+            return int(mask.sum()), float(col("제조원가")[mask].sum())
+
+        ins_q, ins_a = sales_count_amount(month_mask & sales_series.eq("보험매출"))
+        mnt_q, mnt_a = sales_count_amount(month_mask & sales_series.eq("정비매출"))
+        insp_q, insp_a = sales_count_amount(month_mask & sales_series.eq("검사매출"))
+        cons_q, cons_a = sales_count_amount(consign_m)
+
+        sales_values = {
+            "보험매출": (ins_q, ins_a),
+            "정비매출": (mnt_q, mnt_a),
+            "검사매출": (insp_q, insp_a),
+            "위탁매출": (cons_q, cons_a),
+        }
+        partners = partner_series()
+        partner_sum_q = 0
+        partner_sum_a = 0.0
+        for p in _CONSIGNMENT_PARTNERS:
+            pq, pa = sales_count_amount(consign_m & partners.eq(p))
+            sales_values[p] = (pq, pa)
+            partner_sum_q += pq
+            partner_sum_a += pa
+        sales_values["기타"] = (cons_q - partner_sum_q, cons_a - partner_sum_a)
+
+        col_q = sales_table.columns.get_loc((month_label, "대수"))
+        col_a = sales_table.columns.get_loc((month_label, "금액"))
+        for row_pos, (name, level) in enumerate(sales_rows):
+            q, a = sales_values[name]
+            sales_table.iloc[row_pos, col_q] = q
+            sales_table.iloc[row_pos, col_a] = a
+
+        # ③ 위탁 수불 (위탁매출)
+        c_base_q = s(consign_m, "기초_수량")
+        c_base_a = float(col("제조원가")[consign_m & col("기초_수량").gt(0)].sum())
+        c_in_q = s(consign_m, "정상입고_수량")
+        c_in_a = float(col("제조원가")[consign_m & col("정상입고_수량").gt(0)].sum())
+        c_out_q = s(consign_m, "정상출고_수량")
+        c_out_a = s(consign_m, "정상출고_금액")
+        status = (
+            df["위탁출고구분"].astype(str).str.strip()
+            if "위탁출고구분" in df.columns
+            else pd.Series([""] * len(df), index=df.index)
+        )
+        def consign_status(value):
+            mask = consign_m & status.eq(value)
+            return s(mask, "정상출고_수량"), s(mask, "정상출고_금액")
+        sale_q, sale_a = consign_status("위탁판매")
+        buy_q, buy_a = consign_status("위탁매입")
+        cancel_q, cancel_a = consign_status("위탁취소")
+        c_end_q = c_base_q + c_in_q - c_out_q
+        c_end_a = c_base_a + c_in_a - c_out_a
+
+        consign_values_ordered = [
+            (c_base_q, c_base_a),
+            (c_base_q, c_base_a),
+            (c_in_q, c_in_a),
+            (c_in_q, c_in_a),
+            (c_out_q, c_out_a),
+            (c_out_q, c_out_a),
+            (sale_q, sale_a),
+            (buy_q, buy_a),
+            (cancel_q, cancel_a),
+            (c_end_q, c_end_a),
+        ]
+        col_q = consign_table.columns.get_loc((month_label, "대수"))
+        col_a = consign_table.columns.get_loc((month_label, "금액"))
+        for row_pos, value in enumerate(consign_values_ordered):
+            q, a = value
+            consign_table.iloc[row_pos, col_q] = q
+            consign_table.iloc[row_pos, col_a] = a
+
+    return {"auto": auto_table, "sales": sales_table, "consign": consign_table}
+
+
+def _build_accounting_table(row_specs):
+    """회계처리용 빈 표 생성.
+
+    row_specs: [(행이름, 들여쓰기레벨), ...]
+    반환: 멀티헤더(월/누계 × 대수/금액) DataFrame, 값은 0.
+    중복 라벨은 zero-width space 로 고유화 (Styler 가 비고유 인덱스를 거부하므로).
+    """
+    columns = pd.MultiIndex.from_product(
+        [_ACCOUNTING_MONTH_LABELS, ["대수", "금액"]]
+    )
+    index_labels = []
+    seen = {}
+    for name, level in row_specs:
+        label = ("\u00a0" * (level * 4)) + name
+        # 중복이면 보이지 않는 zero-width space(\u200b) 를 개수만큼 붙여 고유화
+        count = seen.get(label, 0)
+        seen[label] = count + 1
+        if count > 0:
+            label = label + ("\u200b" * count)
+        index_labels.append(label)
+    data = [[0] * len(columns) for _ in row_specs]
+    df = pd.DataFrame(data, index=index_labels, columns=columns)
+    return df
+
+
+def _render_accounting_table(title, table, highlight_rows):
+    """회계처리 표 하나 렌더링 (강조행 색상+볼드, 누계 컬럼 강조)."""
+    st.markdown(f"**{title}**")
+
+    highlight_positions = set(highlight_rows)
+    n_rows = len(table)
+    n_cols = len(table.columns)
+
+    # 위치 기반 스타일 매트릭스 (중복 인덱스 라벨 대응)
+    style_df = pd.DataFrame("", index=table.index, columns=table.columns)
+    for r in range(n_rows):
+        row_style = ""
+        if r in highlight_positions:
+            row_style = "background-color: #fce4d6; font-weight: bold;"
+        for c in range(n_cols):
+            col_tuple = table.columns[c]
+            border = ""
+            if isinstance(col_tuple, tuple) and col_tuple[0] == "누계":
+                border = "border-left: 2px solid #c00000;"
+            style_df.iloc[r, c] = row_style + border
+
+    styler = table.style.format("{:,.0f}").apply(lambda _: style_df, axis=None)
+    st.dataframe(styler, width="stretch")
+
+
+def render_accounting_section(master_df=None):
+    """회계처리 섹션: 상품(자동차) 수불 / 매출구분별 / 상품(위탁) 수불."""
+    st.subheader("2. 회계처리")
+
+    if master_df is None or master_df.empty:
+        st.info("최종 원가 마스터가 저장되면 회계처리 표가 채워집니다.")
+        return
+
+    tables = _compute_accounting_tables(master_df)
+    # 강조행: 소계/합계 (행 위치 기준)
+    # ① 자동차: 기초재고0, 당기입고1, 당기출고5, 기말재고9
+    _render_accounting_table("상품(자동차) 수불", tables["auto"], [0, 1, 5, 9])
+    # ② 매출구분별: 위탁매출(3)만 강조
+    _render_accounting_table("매출구분별", tables["sales"], [3])
+    # ③ 위탁: 기초재고0, 당기입고2, 당기출고4, 기말재고9
+    _render_accounting_table("상품(위탁) 수불", tables["consign"], [0, 2, 4, 9])
+
+
 tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])
 
 with tab1:
-    st.write("준비 중")
+    st.subheader("1. 원가 데이터")
+    master_df, master_saved_at = load_final_master()
+    if master_df is None:
+        st.info("저장된 최종 원가 마스터가 없습니다. UPLOAD 탭에서 생성 후 '최종 마스터 저장'을 눌러주세요.")
+    else:
+        if master_saved_at:
+            st.caption(f"마지막 저장: {master_saved_at}")
+        st.write(f"건수: {len(master_df):,}건")
+        st.download_button(
+            "최종 원가 마스터 다운로드",
+            data=dataframe_to_excel_bytes(master_df, sheet_name="최종원가마스터"),
+            file_name="final_cost_master.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        st.dataframe(dataframe_for_display(master_df), width="stretch")
+
+        # 데이터 초기화 (저장본 삭제)
+        with st.expander("⚠️ 데이터 초기화"):
+            st.caption("저장된 원가 데이터를 삭제합니다. 이 작업은 되돌릴 수 없습니다.")
+            confirm_reset = st.checkbox(
+                "삭제를 확인합니다", key="confirm_master_reset"
+            )
+            if st.button(
+                "데이터 초기화",
+                key="reset_master",
+                type="secondary",
+                disabled=not confirm_reset,
+            ):
+                if delete_final_master():
+                    st.success("원가 데이터가 초기화되었습니다.")
+                    st.rerun()
+                else:
+                    st.warning("삭제할 데이터가 없습니다.")
+
+    # 회계처리 섹션 (최종원가마스터 아래)
+    st.divider()
+    render_accounting_section(master_df)
 
 with tab2:
     settlement_year, settlement_month = render_settlement_selector()
@@ -1176,7 +1521,7 @@ with tab2:
     verification_sheets = render_verification_sheet_upload()
 
     st.divider()
-    render_final_cost(
+    final_cost_df = render_final_cost(
         product_id_df, purchase_cost_sheet_dfs, dfs, settlement_month,
         manufacturing_cost_sheet_dfs=manufacturing_cost_sheet_dfs,
         verification_sheets=verification_sheets,
@@ -1184,3 +1529,12 @@ with tab2:
         cost_driver_dfs=cost_driver_dfs,
         combined_cost_driver_df=combined_cost_driver_df,
     )
+
+    # 최종 마스터 저장 (서버 공용 — VIEW 탭에서 누구나 조회 가능)
+    st.divider()
+    if final_cost_df is not None and not final_cost_df.empty:
+        if st.button("💾 최종 마스터 저장", key="save_final_master", type="primary"):
+            saved_at = save_final_master(final_cost_df)
+            st.success(f"최종 마스터가 저장되었습니다. ({saved_at}) VIEW 탭에서 확인하세요.")
+    else:
+        st.caption("최종 원가 데이터가 생성되면 '최종 마스터 저장' 버튼이 활성화됩니다.")

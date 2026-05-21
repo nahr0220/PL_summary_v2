@@ -241,18 +241,47 @@ def workbook_to_excel_bytes(sheet_dfs):
 
 
 def dataframe_for_display(df):
-    """Streamlit dataframe 표시용 (object/string 컬럼의 NaN → '')."""
+    """Streamlit dataframe 표시용 (object/string 컬럼의 NaN → '', 날짜 컬럼 시간 제거)."""
     display_df = df.copy()
     display_df.columns = [str(column) for column in display_df.columns]
     for column in display_df.columns:
+        # datetime 컬럼: 시간이 전부 00:00:00 이면 날짜만(YYYY-MM-DD) 표시
+        if pd.api.types.is_datetime64_any_dtype(display_df[column]):
+            series = display_df[column]
+            non_na = series.dropna()
+            times_all_zero = (
+                non_na.empty
+                or (non_na.dt.hour.eq(0).all()
+                    and non_na.dt.minute.eq(0).all()
+                    and non_na.dt.second.eq(0).all())
+            )
+            if times_all_zero:
+                display_df[column] = series.dt.strftime("%Y-%m-%d").where(series.notna(), "")
+            else:
+                display_df[column] = series.dt.strftime("%Y-%m-%d %H:%M:%S").where(series.notna(), "")
+            continue
         if (
             pd.api.types.is_object_dtype(display_df[column])
             or pd.api.types.is_string_dtype(display_df[column])
         ):
             display_df[column] = display_df[column].apply(
-                lambda value: "" if pd.isna(value) else str(value)
+                lambda value: "" if pd.isna(value) else _strip_zero_time(value)
             )
     return display_df
+
+
+def _strip_zero_time(value):
+    """문자열로 들어온 'YYYY-MM-DD 00:00:00' 형태에서 시간이 0 이면 날짜만 남김."""
+    text = str(value)
+    # 'YYYY-MM-DD 00:00:00' 패턴
+    if text.endswith(" 00:00:00") and len(text) == 19:
+        return text[:10]
+    # 'YYYY-MM-DD HH:MM:SS' 인데 시간이 00:00:00 인 경우 일반화
+    import re as _re
+    m = _re.match(r"^(\d{4}-\d{2}-\d{2}) 00:00:00(\.0+)?$", text)
+    if m:
+        return m.group(1)
+    return text
 
 
 # ============================================================

@@ -1167,17 +1167,27 @@ def save_final_master(final_cost_df):
     return saved_at
 
 
+@st.cache_data(show_spinner=False)
+def _read_master_excel_cached(path, mtime):
+    """엑셀 마스터 읽기 (파일 수정시각 mtime 을 캐시 키로 사용)."""
+    try:
+        return pd.read_excel(path, sheet_name="최종원가마스터")
+    except Exception:
+        return pd.read_excel(path)
+
+
 def load_final_master():
-    """저장된 최종원가 결과(엑셀) 불러오기. (df, 저장시각) 또는 (None, None)."""
+    """저장된 최종원가 결과(엑셀) 불러오기. (df, 저장시각) 또는 (None, None).
+
+    파일 수정시각 기반 캐싱으로 매 리런마다 디스크 재읽기를 피한다.
+    """
     if not _os.path.exists(MASTER_FILE_PATH):
         return None, None
     try:
-        df = pd.read_excel(MASTER_FILE_PATH, sheet_name="최종원가마스터")
+        mtime = _os.path.getmtime(MASTER_FILE_PATH)
+        df = _read_master_excel_cached(MASTER_FILE_PATH, mtime)
     except Exception:
-        try:
-            df = pd.read_excel(MASTER_FILE_PATH)
-        except Exception:
-            return None, None
+        return None, None
     saved_at = None
     if _os.path.exists(MASTER_META_PATH):
         try:
@@ -1439,7 +1449,7 @@ def _render_accounting_table(title, table, highlight_rows):
 
 def render_accounting_section(master_df=None):
     """회계처리 섹션: 상품(자동차) 수불 / 매출구분별 / 상품(위탁) 수불."""
-    st.subheader("2. 회계처리")
+    st.subheader("회계처리")
 
     if master_df is None or master_df.empty:
         st.info("최종 원가 마스터가 저장되면 회계처리 표가 채워집니다.")
@@ -1458,8 +1468,15 @@ def render_accounting_section(master_df=None):
 tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])
 
 with tab1:
-    st.subheader("1. 원가 데이터")
     master_df, master_saved_at = load_final_master()
+
+    # 회계처리 (먼저)
+    render_accounting_section(master_df)
+
+    st.divider()
+
+    # 차량별 원가
+    st.subheader("차량별 원가")
     if master_df is None:
         st.info("저장된 최종 원가 마스터가 없습니다. UPLOAD 탭에서 생성 후 '최종 마스터 저장'을 눌러주세요.")
     else:
@@ -1491,10 +1508,6 @@ with tab1:
                     st.rerun()
                 else:
                     st.warning("삭제할 데이터가 없습니다.")
-
-    # 회계처리 섹션 (최종원가마스터 아래)
-    st.divider()
-    render_accounting_section(master_df)
 
 with tab2:
     settlement_year, settlement_month = render_settlement_selector()

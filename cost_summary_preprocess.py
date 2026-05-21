@@ -206,8 +206,77 @@ def dataframe_to_excel_bytes(df, sheet_name="Sheet1"):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
+        _apply_excel_column_group_styles(writer.sheets[sheet_name], df)
     output.seek(0)
     return output.getvalue()
+
+
+# ===== 최종원가 컬럼 그룹별 색상 =====
+# 그룹 A: 수량/금액/출고/기말 + 원가동인/유효실측시간
+_COLUMN_GROUP_A = [
+    "기초_수량", "기초_금액", "정상입고_수량", "정상입고_금액",
+    "타처입고_수량", "타처입고_금액", "제조원가",
+    "정상출고_수량", "정상출고_금액", "자산출고_수량", "자산출고_금액",
+    "기타출고_수량", "기타출고_금액", "기말_수량", "기말_금액",
+    "RTC_일수", "SM_일수",
+    "유효실측시간_전체", "유효실측시간_RQI", "유효실측시간_정비",
+    "유효실측시간_판금", "유효실측시간_도장",
+]
+# 그룹 B: 매출원가/매입원가/제조원가/항목별/페이백/재료비·노무비·제조경비 누적
+_COLUMN_GROUP_B = [
+    "매출원가_누적합계", "매출원가_전월누적", "매출원가_당월",
+    "매입원가_누적합계", "매입원가_전월누적", "매입원가_당월",
+    "제조원가_누적합계", "제조원가_전월누적", "제조원가_당월",
+    "상품매입액_합계", "상품매입액_전월", "상품매입액_당월",
+    "취득세_합계", "취득세_전월", "취득세_당월",
+    "매입수수료_합계", "매입수수료_전월", "매입수수료_당월",
+    "폐자원공제_합계", "폐자원공제_전월", "폐자원공제_당월",
+    "차액배부_합계", "차액배부_전월", "차액배부_당월",
+    "페이백_합계", "페이백_전월", "페이백_당월",
+    "페이백(반납)_합계", "페이백(반납)_전월", "페이백(반납)_당월",
+    "페이백(미반납)_합계", "페이백(미반납)_전월", "페이백(미반납)_당월",
+    "초과운행_합계", "초과운행_전월", "초과운행_당월",
+    "재료비_누적합계", "재료비_전월누적", "재료비_당월",
+    "노무비_누적합계", "노무비_전월누적", "노무비_당월",
+    "제조경비_누적합계", "제조경비_전월누적", "제조경비_당월",
+]
+_GROUP_A_COLOR = "DDEBF7"   # 옅은 파랑
+_GROUP_B_COLOR = "E2EFDA"   # 옅은 초록
+
+
+def _column_group_of(column_name):
+    """컬럼명이 속한 그룹 반환: 'A' / 'B' / None."""
+    name = str(column_name)
+    if name in _COLUMN_GROUP_A:
+        return "A"
+    if name in _COLUMN_GROUP_B:
+        return "B"
+    return None
+
+
+def _apply_excel_column_group_styles(worksheet, df):
+    """엑셀 시트에 컬럼 그룹별 배경색 + 헤더 볼드/큰글씨 적용."""
+    try:
+        from openpyxl.styles import PatternFill, Font
+    except Exception:
+        return
+
+    fill_a = PatternFill(start_color=_GROUP_A_COLOR, end_color=_GROUP_A_COLOR, fill_type="solid")
+    fill_b = PatternFill(start_color=_GROUP_B_COLOR, end_color=_GROUP_B_COLOR, fill_type="solid")
+    n_rows = len(df)
+
+    for col_idx, column_name in enumerate(df.columns, start=1):
+        group = _column_group_of(column_name)
+        # 헤더(1행): 볼드 + 글씨 크게 (그룹이면 색도)
+        header_cell = worksheet.cell(row=1, column=col_idx)
+        header_cell.font = Font(bold=True, size=12)
+        if group is None:
+            continue
+        fill = fill_a if group == "A" else fill_b
+        header_cell.fill = fill
+        # 데이터 셀(2행~)에 색칠
+        for row_offset in range(n_rows):
+            worksheet.cell(row=2 + row_offset, column=col_idx).fill = fill
 
 
 def _safe_excel_sheet_name(name, used_names):
@@ -238,6 +307,52 @@ def workbook_to_excel_bytes(sheet_dfs):
             df.to_excel(writer, index=False, sheet_name=safe_sheet_name)
     output.seek(0)
     return output.getvalue()
+
+
+def styled_dataframe_for_display(df):
+    """화면 표시용 Styler: 컬럼 그룹별 배경색 + 헤더 볼드/큰글씨.
+
+    st.dataframe(styled_dataframe_for_display(df)) 형태로 사용.
+    그룹 컬럼이 하나도 없으면 일반 display DataFrame 을 그대로 반환.
+    셀 수가 많으면 Styler 렌더 한도를 자동으로 올린다.
+    """
+    display_df = dataframe_for_display(df)
+
+    group_map = {col: _column_group_of(col) for col in display_df.columns}
+    if not any(group_map.values()):
+        return display_df  # 색칠 대상 없음
+
+    # Styler 렌더 셀 수 한도 자동 상향 (기본 262,144)
+    n_cells = display_df.shape[0] * display_df.shape[1]
+    try:
+        current_max = pd.get_option("styler.render.max_elements")
+        if n_cells > current_max:
+            pd.set_option("styler.render.max_elements", int(n_cells * 1.1) + 1)
+    except Exception:
+        pass
+
+    color_map = {"A": f"#{_GROUP_A_COLOR}", "B": f"#{_GROUP_B_COLOR}"}
+
+    def _col_style(col):
+        g = group_map.get(col.name)
+        if g is None:
+            return ["" for _ in col]
+        return [f"background-color: {color_map[g]};" for _ in col]
+
+    def _header_style():
+        styles = []
+        for col in display_df.columns:
+            g = group_map.get(col)
+            bg = f"background-color: {color_map[g]}; " if g else ""
+            styles.append({
+                "selector": f"th.col_heading.col{list(display_df.columns).index(col)}",
+                "props": f"{bg}font-weight: bold; font-size: 13px;",
+            })
+        return styles
+
+    styler = display_df.style.apply(_col_style, axis=0)
+    styler = styler.set_table_styles(_header_style(), overwrite=False)
+    return styler
 
 
 def dataframe_for_display(df):

@@ -233,6 +233,9 @@ def _append_previous_month_cost_columns(
                 .pipe(lambda s: pd.to_numeric(s, errors="coerce"))
                 .fillna(0)
             )
+            final_df["상품매입액_전월"] = pd.to_numeric(
+                final_df["상품매입액_전월"], errors="coerce"
+            ).fillna(0).astype(float)
             final_df.loc[transfer_in_rows, "상품매입액_전월"] = mapped_amounts.values
             final_df["상품매입액_합계"] = (
                 pd.to_numeric(final_df["상품매입액_전월"], errors="coerce").fillna(0)
@@ -283,6 +286,10 @@ def _allocate_amount_proportional(
         return
 
     allocations = (weights / weights_sum * total_amount).round()
+    # int dtype 컬럼에 float 대입 방지 (pandas 2.x)
+    final_df[target_column] = pd.to_numeric(
+        final_df[target_column], errors="coerce"
+    ).fillna(0).astype(float)
     final_df.loc[row_mask, target_column] = allocations.values
 
     remainder = total_amount - allocations.sum()
@@ -697,6 +704,10 @@ def _allocate_amount_proportional_rounded(
                 for index in candidate_indices[:abs(remainder_int)]:
                     allocations.loc[index] += step
 
+    # int dtype 컬럼에 float 대입 방지 (pandas 2.x)
+    final_df[target_column] = pd.to_numeric(
+        final_df[target_column], errors="coerce"
+    ).fillna(0).astype(float)
     final_df.loc[row_mask, target_column] = allocations.values
 
 
@@ -725,6 +736,10 @@ def _allocate_amount_by_rounded_unit_rate(
 
     unit_rate = _round_half_up(total_amount / weights_sum)
     allocations = weights * unit_rate
+    # 대상 컬럼이 int dtype 이면 float 값 대입 시 에러(pandas 2.x) → float 로 캐스팅
+    final_df[target_column] = pd.to_numeric(
+        final_df[target_column], errors="coerce"
+    ).fillna(0).astype(float)
     final_df.loc[row_mask, target_column] = allocations.values
 
     return float(allocations.sum()), int(unit_rate)
@@ -1302,6 +1317,99 @@ def _append_total_purchase_cost_columns(final_df):
     return final_df
 
 
+def _append_cost_group_cumulative_columns(
+    final_df, inventory_df, settlement_month,
+):
+    """재료비 / 노무비 / 제조경비 의 누적합계·전월누적·당월 컬럼 부여.
+
+    당월값:
+        재료비_당월 = 재료비_합, 노무비_당월 = 노무비_합계, 제조경비_당월 = 제조경비_합계
+    전월누적:
+        기초재고에서 전월 기말 행의 '{그룹}_전월' 컬럼값 (초과운행_전월 등과 동일 방식)
+    누적합계:
+        전월누적 + 당월
+    """
+    group_specs = [
+        ("재료비", "재료비_합"),
+        ("노무비", LABOR_COST_TOTAL_COLUMN),       # 노무비_합계
+        ("제조경비", "제조경비_합계"),
+    ]
+
+    # 1) 당월값 + 전월누적 0 초기화
+    for group_name, source_column in group_specs:
+        current_column = f"{group_name}_당월"
+        previous_column = f"{group_name}_전월누적"
+        if source_column in final_df.columns:
+            final_df[current_column] = pd.to_numeric(
+                final_df[source_column], errors="coerce"
+            ).fillna(0)
+        else:
+            final_df[current_column] = 0
+        final_df[previous_column] = 0
+
+    # 2) 전월누적: 기초재고에서 전월 기말 행의 '{그룹}_전월' 값 가져오기
+    if (
+        inventory_df is not None
+        and not inventory_df.empty
+        and "상품ID" in inventory_df.columns
+    ):
+        inventory = _strip_columns(inventory_df).copy()
+
+        if settlement_month is not None:
+            previous_month = 12 if int(settlement_month) == 1 else int(settlement_month) - 1
+            previous_flag_column = f"{previous_month}월 기말여부"
+            if previous_flag_column in inventory.columns:
+                inventory = inventory[_is_flag_one(inventory[previous_flag_column])].copy()
+            else:
+                inventory = inventory.iloc[0:0].copy()
+
+        inventory["상품ID"] = inventory["상품ID"].astype(str).str.strip()
+        inventory = inventory[inventory["상품ID"].ne("")].copy()
+
+        # 기초재고 시트의 전월 컬럼명: '{그룹}_전월'
+        source_to_target = {
+            f"{group_name}_전월": f"{group_name}_전월누적"
+            for group_name, _ in group_specs
+        }
+        available_sources = [
+            src for src in source_to_target if src in inventory.columns
+        ]
+
+        if available_sources and not inventory.empty:
+            for src in available_sources:
+                inventory[src] = pd.to_numeric(
+                    inventory[src], errors="coerce"
+                ).fillna(0)
+            previous_df = (
+                inventory.groupby("상품ID", as_index=False)[available_sources].sum()
+            )
+            previous_df = previous_df.rename(columns=source_to_target)
+            target_columns = [source_to_target[src] for src in available_sources]
+
+            final_df = final_df.drop(columns=target_columns)
+            final_df = _merge_by_product_id(final_df, previous_df, target_columns)
+            for col in target_columns:
+                final_df[col] = pd.to_numeric(
+                    final_df[col], errors="coerce"
+                ).fillna(0)
+
+    # 3) 누적합계 = 전월누적 + 당월
+    for group_name, _ in group_specs:
+        final_df[f"{group_name}_누적합계"] = (
+            pd.to_numeric(final_df[f"{group_name}_전월누적"], errors="coerce").fillna(0)
+            + pd.to_numeric(final_df[f"{group_name}_당월"], errors="coerce").fillna(0)
+        )
+
+    # 4) 제조원가 = 재료비 + 노무비 + 제조경비 (각 누적합계/전월누적/당월 합산)
+    for suffix in ("_누적합계", "_전월누적", "_당월"):
+        final_df[f"제조원가{suffix}"] = sum(
+            pd.to_numeric(final_df[f"{group_name}{suffix}"], errors="coerce").fillna(0)
+            for group_name, _ in group_specs
+        )
+
+    return final_df
+
+
 def _reorder_final_columns(
     final_df,
     manufacturing_cost_sheet_dfs=None,
@@ -1310,6 +1418,7 @@ def _reorder_final_columns(
     settlement_month=None,
     cost_driver_dfs=None,
     combined_cost_driver_df=None,
+    inventory_df=None,
 ):
     """매입원가 + 항목별 [합계, 전월, 당월] + 재료비 + 원가동인 + 공정별 컬럼 정렬.
 
@@ -1347,13 +1456,42 @@ def _reorder_final_columns(
     # 진단 내역을 결과 DataFrame 의 attrs 에 저장 (UI 에서 표시용)
     final_df.attrs["제조경비_배부내역"] = manufacturing_expense_diagnostics
 
+    # 제조경비_합계 = 직접 + 임차 + 전체 + RQI + 정비 + 판금 + 도장 + 선물 + 기타배부
+    manufacturing_expense_all_columns = (
+        ["제조경비_직접"]
+        + [name for name, _, _ in MANUFACTURING_EXPENSE_ALLOCATION_SPECS]
+        + [MANUFACTURING_EXPENSE_GIFT_COLUMN]
+        + [MANUFACTURING_EXPENSE_EXTRA_ALLOCATION_COLUMN]
+    )
+    final_df["제조경비_합계"] = sum(
+        pd.to_numeric(final_df[c], errors="coerce").fillna(0)
+        for c in manufacturing_expense_all_columns
+        if c in final_df.columns
+    )
+
+    # 재료비/노무비/제조경비 누적합계·전월누적·당월 컬럼 (제조경비_합계 계산 후)
+    final_df = _append_cost_group_cumulative_columns(
+        final_df, inventory_df, settlement_month,
+    )
+
     tail_columns = [
         f"{TOTAL_PURCHASE_COST_COLUMN}_합계",
         f"{TOTAL_PURCHASE_COST_COLUMN}_전월",
         TOTAL_PURCHASE_COST_COLUMN,
+        # 매입원가_당월 뒤: 제조원가 누적합계/전월누적/당월
+        "제조원가_누적합계",
+        "제조원가_전월누적",
+        "제조원가_당월",
     ]
     for column in FINAL_COST_MONTHLY_COLUMNS:
         tail_columns.extend([f"{column}_합계", f"{column}_전월", column])
+    # 초과운행_당월(EXCESS_DRIVING_COLUMN) 뒤: 재료비/노무비/제조경비 누적 묶음
+    for group_name in ("재료비", "노무비", "제조경비"):
+        tail_columns.extend([
+            f"{group_name}_누적합계",
+            f"{group_name}_전월누적",
+            f"{group_name}_당월",
+        ])
     tail_columns.extend(["재료비_합", "재료비_직접", "재료비_배부"])
     tail_columns.extend(["rtc_일수", "sm_일수"])
     tail_columns.extend([PROCESS_CATEGORY_TOTAL_COLUMN])
@@ -1361,6 +1499,7 @@ def _reorder_final_columns(
     tail_columns.extend([LABOR_COST_TOTAL_COLUMN])
     tail_columns.extend([name for name, _, _ in LABOR_COST_SPECS])
     tail_columns.extend([LABOR_COST_GIFT_COLUMN])
+    tail_columns.extend(["제조경비_합계"])
     tail_columns.extend(["제조경비_직접"])
     tail_columns.extend([name for name, _, _ in MANUFACTURING_EXPENSE_ALLOCATION_SPECS])
     tail_columns.extend([MANUFACTURING_EXPENSE_GIFT_COLUMN])
@@ -1368,7 +1507,67 @@ def _reorder_final_columns(
 
     tail_columns = [c for c in tail_columns if c in final_df.columns]
     base_columns = [c for c in final_df.columns if c not in tail_columns]
-    return final_df[base_columns + tail_columns]
+    final_df = final_df[base_columns + tail_columns]
+
+    # 최종 출력 컬럼명으로 변경 (계산은 내부 이름으로 끝났고 표시용만 rename)
+    final_df = final_df.rename(columns=_build_output_column_rename_map())
+    return final_df
+
+
+def _build_output_column_rename_map():
+    """내부 계산용 컬럼명 → 최종 출력 컬럼명 매핑.
+
+    계산 로직에서 쓰는 컬럼명은 그대로 두고, 최종 결과 표시에만 사용한다.
+    """
+    rename_map = {}
+
+    # 매입원가: 누적합계 / 전월누적 / 당월
+    rename_map[f"{TOTAL_PURCHASE_COST_COLUMN}_합계"] = f"{TOTAL_PURCHASE_COST_COLUMN}_누적합계"
+    rename_map[f"{TOTAL_PURCHASE_COST_COLUMN}_전월"] = f"{TOTAL_PURCHASE_COST_COLUMN}_전월누적"
+    rename_map[TOTAL_PURCHASE_COST_COLUMN] = f"{TOTAL_PURCHASE_COST_COLUMN}_당월"
+
+    # 항목별 (상품매입액 ~ 초과운행): 당월값에 _당월 접미사 (합계/전월은 유지)
+    for column in FINAL_COST_MONTHLY_COLUMNS:
+        rename_map[column] = f"{column}_당월"
+
+    # 재료비
+    rename_map["재료비_합"] = "당월_재료비_합계"
+    rename_map["재료비_직접"] = "당월_재료비_직접"
+    rename_map["재료비_배부"] = "당월_재료비_배부"
+
+    # 원가동인
+    rename_map["rtc_일수"] = "RTC_일수"
+    rename_map["sm_일수"] = "SM_일수"
+
+    # 공정별 → 유효실측시간
+    rename_map[PROCESS_CATEGORY_TOTAL_COLUMN] = "유효실측시간_전체"
+    rename_map["공정별_RQI"] = "유효실측시간_RQI"
+    rename_map["공정별_정비"] = "유효실측시간_정비"
+    rename_map["공정별_판금"] = "유효실측시간_판금"
+    rename_map["공정별_도장"] = "유효실측시간_도장"
+
+    # 노무비 → 당월_노무비_*
+    rename_map[LABOR_COST_TOTAL_COLUMN] = "당월_노무비_합계"
+    rename_map["노무비_전체"] = "당월_노무비_전체"
+    rename_map["노무비_RQI"] = "당월_노무비_RQI"
+    rename_map["노무비_정비"] = "당월_노무비_정비"
+    rename_map["노무비_판금"] = "당월_노무비_판금"
+    rename_map["노무비_도장"] = "당월_노무비_도장"
+    rename_map[LABOR_COST_GIFT_COLUMN] = "당월_노무비_선물"
+
+    # 제조경비 → 당월_제조경비_*
+    rename_map["제조경비_합계"] = "당월_제조경비_합계"
+    rename_map["제조경비_직접"] = "당월_제조경비_직접"
+    rename_map["제조경비_임차"] = "당월_제조경비_임차료"
+    rename_map["제조경비_전체"] = "당월_제조경비_전체"
+    rename_map["제조경비_RQI"] = "당월_제조경비_RQI"
+    rename_map["제조경비_정비"] = "당월_제조경비_정비"
+    rename_map["제조경비_판금"] = "당월_제조경비_판금"
+    rename_map["제조경비_도장"] = "당월_제조경비_도장"
+    rename_map[MANUFACTURING_EXPENSE_GIFT_COLUMN] = "당월_제조경비_선물"
+    rename_map[MANUFACTURING_EXPENSE_EXTRA_ALLOCATION_COLUMN] = "당월_제조경비_기타배부"
+
+    return rename_map
 
 
 # ============================================================
@@ -1402,6 +1601,7 @@ def build_final_cost_df(
         settlement_month=settlement_month,
         cost_driver_dfs=cost_driver_dfs,
         combined_cost_driver_df=combined_cost_driver_df,
+        inventory_df=inventory_df,
     )
 
     # 매입원가 시트가 없으면 전월 컬럼만 채우고 종료

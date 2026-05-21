@@ -12,6 +12,7 @@
 
 import re
 
+import numpy as np
 import pandas as pd
 
 from cost_summary_preprocess import (
@@ -699,6 +700,36 @@ def _allocate_amount_proportional_rounded(
     final_df.loc[row_mask, target_column] = allocations.values
 
 
+def _round_half_up(value):
+    """스칼라 반올림 (0.5 는 올림). 파이썬 기본 round 의 banker's rounding 회피."""
+    return int(np.floor(float(value) + 0.5))
+
+
+def _allocate_amount_by_rounded_unit_rate(
+    final_df, target_column, total_amount, weight_series, row_mask=None,
+):
+    """방식 B: 단가(배부총액 ÷ 가중치합)를 정수로 반올림한 뒤,
+    각 행 = 그 행 가중치 × 정수단가 로 배부.
+
+    분모(가중치합)와 개별 가중치는 원래 값(소수 포함) 그대로 사용하고, 단가만 정수 반올림한다.
+    합계가 배부총액과 달라질 수 있으며, 그 차액은 호출측에서 기타배부로 처리한다.
+    반환: (실제 배부 합계, 정수 단가)
+    """
+    if row_mask is None:
+        row_mask = pd.Series(True, index=final_df.index)
+
+    weights = pd.to_numeric(weight_series[row_mask], errors="coerce").fillna(0)
+    weights_sum = weights.sum()
+    if weights_sum == 0 or total_amount == 0:
+        return 0.0, 0
+
+    unit_rate = _round_half_up(total_amount / weights_sum)
+    allocations = weights * unit_rate
+    final_df.loc[row_mask, target_column] = allocations.values
+
+    return float(allocations.sum()), int(unit_rate)
+
+
 def _append_manufacturing_expense_columns(
     final_df,
     manufacturing_cost_sheet_dfs,
@@ -796,49 +827,45 @@ def _append_manufacturing_expense_columns(
         department_amount = float(department_expense_totals.get(target, 0))
         allocation_total = verification_amount + department_amount
 
+        # 분모(가중치합): 원래 값 그대로 (실제 계산과 동일)
         weight_sum = float(
             pd.to_numeric(final_df[weight_column], errors="coerce").fillna(0).sum()
         )
+        unit_rate = _round_half_up(allocation_total / weight_sum) if weight_sum else 0
 
-        diag_entry = None
+        # 기타배부 계산용 누적 (분자)
+        numerator_sum += allocation_total
+
+        column_actual = 0.0
+        if allocation_total != 0:
+            # 방식 B: 정수 단가 × 행 가중치 로 배부
+            column_actual, unit_rate = _allocate_amount_by_rounded_unit_rate(
+                final_df,
+                column_name,
+                allocation_total,
+                final_df[weight_column],
+            )
+            actual_sum += column_actual
+
         if diagnostics is not None:
-            unit_rate = round(allocation_total / weight_sum) if weight_sum else 0
-            diag_entry = {
+            diagnostics.append({
                 "컬럼": column_name,
                 "배부총액(분자)": allocation_total,
-                "실제배부값합": 0.0,
+                "실제배부값합": column_actual,
                 "가중치합(분모)": weight_sum,
                 "단가": unit_rate,
                 "비고": (
                     f"검증시트 {verification_amount:,.0f} + 부문별경비 {department_amount:,.0f}"
-                    f" / 가중치={weight_column}"
+                    f" / 가중치={weight_column} (단가×가중치)"
                 ),
-            }
-            diagnostics.append(diag_entry)
-
-        # 기타배부 계산용 누적
-        numerator_sum += allocation_total
-
-        if allocation_total == 0:
-            continue
-
-        _allocate_amount_proportional_rounded(
-            final_df,
-            column_name,
-            allocation_total,
-            final_df[weight_column],
-        )
-        column_actual = float(
-            pd.to_numeric(final_df[column_name], errors="coerce").fillna(0).sum()
-        )
-        actual_sum += column_actual
-        if diag_entry is not None:
-            diag_entry["실제배부값합"] = column_actual
+            })
 
     gift_verification = float(verification_totals.get(MANUFACTURING_EXPENSE_GIFT_TARGET, 0))
     gift_department = float(department_expense_totals.get(MANUFACTURING_EXPENSE_GIFT_TARGET, 0))
     gift_total = gift_verification + gift_department
     gift_weight_sum = 0.0
+    gift_unit_rate = 0
+    gift_actual = 0.0
     if (
         gift_total != 0
         and MANUFACTURING_EXPENSE_GIFT_FILTER_COLUMN in final_df.columns
@@ -855,7 +882,8 @@ def _append_manufacturing_expense_columns(
                     errors="coerce",
                 ).fillna(0).sum()
             )
-            _allocate_amount_proportional_rounded(
+            # 방식 B: 정수 단가 × 행 가중치
+            gift_actual, gift_unit_rate = _allocate_amount_by_rounded_unit_rate(
                 final_df,
                 MANUFACTURING_EXPENSE_GIFT_COLUMN,
                 gift_total,
@@ -865,22 +893,18 @@ def _append_manufacturing_expense_columns(
 
     # 기타배부 계산용 누적 (선물)
     numerator_sum += gift_total
-    gift_actual = float(
-        pd.to_numeric(final_df[MANUFACTURING_EXPENSE_GIFT_COLUMN], errors="coerce").fillna(0).sum()
-    )
     actual_sum += gift_actual
 
     if diagnostics is not None:
-        unit_rate = round(gift_total / gift_weight_sum) if gift_weight_sum else 0
         diagnostics.append({
             "컬럼": MANUFACTURING_EXPENSE_GIFT_COLUMN,
             "배부총액(분자)": gift_total,
             "실제배부값합": gift_actual,
             "가중치합(분모)": gift_weight_sum,
-            "단가": unit_rate,
+            "단가": gift_unit_rate,
             "비고": (
                 f"검증시트 {gift_verification:,.0f} + 부문별경비 {gift_department:,.0f}"
-                f" / 분류1='선물' 행의 {MANUFACTURING_EXPENSE_GIFT_WEIGHT_COLUMN}"
+                f" / 분류1='선물' 행의 {MANUFACTURING_EXPENSE_GIFT_WEIGHT_COLUMN} (단가×가중치)"
             ),
         })
 

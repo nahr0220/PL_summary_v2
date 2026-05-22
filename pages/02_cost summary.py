@@ -41,6 +41,77 @@ from cost_summary_preprocess import (
 from cost_summary_builder import build_final_cost_df, get_last_manufacturing_expense_diagnostics
 
 
+def _build_input_fingerprint(*dfs_and_values):
+    """빌드 입력의 지문 생성 (shape + 숫자합계 + 스칼라값).
+
+    shape 뿐 아니라 숫자 컬럼 합계도 포함해, 행수가 같고 값만 바뀐 경우도 감지.
+    """
+    def df_signature(df):
+        try:
+            numeric_sum = float(
+                pd.to_numeric(
+                    df.select_dtypes(include="number").sum().sum(), errors="coerce"
+                )
+            )
+        except Exception:
+            numeric_sum = 0.0
+        return (df.shape, tuple(map(str, df.columns)), round(numeric_sum, 2))
+
+    parts = []
+    for item in dfs_and_values:
+        if isinstance(item, pd.DataFrame):
+            parts.append(("df", df_signature(item)))
+        elif isinstance(item, dict):
+            sub = []
+            for k, v in sorted(item.items(), key=lambda x: str(x[0])):
+                if isinstance(v, pd.DataFrame):
+                    sub.append((str(k), df_signature(v)))
+                else:
+                    sub.append((str(k), str(type(v))))
+            parts.append(("dict", tuple(sub)))
+        else:
+            parts.append(("val", str(item)))
+    return repr(parts)
+
+
+def _cached_build_final_cost_df(
+    product_id_df, purchase_cost_sheet_dfs, inventory_df, settlement_month,
+    manufacturing_cost_sheet_dfs, verification_sheets, settlement_year,
+    cost_driver_dfs, combined_cost_driver_df, consignment_ledger_df,
+):
+    """입력 지문이 같으면 session_state 에 저장된 직전 빌드 결과를 재사용."""
+    fingerprint = _build_input_fingerprint(
+        product_id_df, purchase_cost_sheet_dfs, inventory_df, settlement_month,
+        manufacturing_cost_sheet_dfs, verification_sheets, settlement_year,
+        cost_driver_dfs, combined_cost_driver_df, consignment_ledger_df,
+    )
+    cache_key = "_final_cost_cache"
+    cached = st.session_state.get(cache_key)
+    if cached is not None and cached.get("fingerprint") == fingerprint:
+        # 진단도 함께 복원 (모듈 백업에 다시 세팅)
+        return cached["result"], cached.get("diagnostics", [])
+
+    result = build_final_cost_df(
+        product_id_df,
+        purchase_cost_sheet_dfs,
+        inventory_df,
+        settlement_month,
+        manufacturing_cost_sheet_dfs=manufacturing_cost_sheet_dfs,
+        verification_sheets=verification_sheets,
+        settlement_year=settlement_year,
+        cost_driver_dfs=cost_driver_dfs,
+        combined_cost_driver_df=combined_cost_driver_df,
+        consignment_ledger_df=consignment_ledger_df,
+    )
+    diagnostics = get_last_manufacturing_expense_diagnostics()
+    st.session_state[cache_key] = {
+        "fingerprint": fingerprint,
+        "result": result,
+        "diagnostics": diagnostics,
+    }
+    return result, diagnostics
+
+
 # ============================================================
 # 1. 유틸
 # ============================================================
@@ -450,7 +521,7 @@ def render_cost_driver_upload(settlement_year=None, settlement_month=None):
     st.markdown("##### 3-1 원가동인")
 
     uploaded_files = st.file_uploader(
-        "원가동인 업로드 (AQI실적/TS/RTLS/RTC/SM)",
+        "원가동인 파일을 업로드하세요. (AQI실적 / TS / RTLS / rtc / sm)",
         type=["xlsx", "xls"], accept_multiple_files=True, key="cost_driver_files",
     )
 
@@ -692,11 +763,13 @@ KOREAN_HOLIDAYS_FALLBACK = {
 }
 
 
+@st.cache_data(show_spinner=False)
 def _build_korean_holiday_checker(year_hint=None):
     """한국 공휴일 set (datetime.date 집합) 반환.
 
     1순위: holidays 패키지 사용
     2순위: KOREAN_HOLIDAYS_FALLBACK 하드코딩 데이터 사용
+    (결산연도만 입력이라 캐싱 안전 — 매 리런마다 재계산 방지)
     """
     if year_hint is None:
         year_hint = pd.Timestamp.today().year
@@ -1029,7 +1102,7 @@ def render_verification_sheet_upload():
     st.markdown("##### 3-2 기간별제조원가보고서")
 
     uploaded_file = st.file_uploader(
-        "기간별제조원가보고서 업로드",
+        "기간별제조원가보고 업로드.",
         type=["xlsx", "xls"], accept_multiple_files=False, key="verification_sheet_file",
     )
 
@@ -1071,17 +1144,17 @@ def render_final_cost(
 ):
     st.subheader("4 차량별 원가현황")
 
-    final_cost_df = build_final_cost_df(
+    final_cost_df, _cached_diag = _cached_build_final_cost_df(
         product_id_df,
         purchase_cost_sheet_dfs,
         dfs.get("기초재고_전체"),
         settlement_month,
-        manufacturing_cost_sheet_dfs=manufacturing_cost_sheet_dfs,
-        verification_sheets=verification_sheets,
-        settlement_year=settlement_year,
-        cost_driver_dfs=cost_driver_dfs,
-        combined_cost_driver_df=combined_cost_driver_df,
-        consignment_ledger_df=dfs.get("위탁수불부_전체"),
+        manufacturing_cost_sheet_dfs,
+        verification_sheets,
+        settlement_year,
+        cost_driver_dfs,
+        combined_cost_driver_df,
+        dfs.get("위탁수불부_전체"),
     )
 
     if final_cost_df.empty:
@@ -1092,9 +1165,11 @@ def render_final_cost(
         st.info("2-1 매입원가의 상품원장 데이터를 업로드하면 금액 컬럼이 채워집니다.")
 
     # 제조경비 배부 내역 (분자 / 분모 / 단가)
-    expense_diagnostics = final_cost_df.attrs.get("제조경비_배부내역")
+    # 캐시된 진단 우선 → attrs → 모듈 백업 순
+    expense_diagnostics = _cached_diag
     if not expense_diagnostics:
-        # df.attrs 가 사라진 경우 모듈 레벨 백업에서 가져옴
+        expense_diagnostics = final_cost_df.attrs.get("제조경비_배부내역")
+    if not expense_diagnostics:
         expense_diagnostics = get_last_manufacturing_expense_diagnostics()
     if expense_diagnostics:
         with st.expander("🔍 제조경비 배부 내역 (배부총액 ÷ 가중치합 = 단가)"):
@@ -1477,7 +1552,7 @@ with tab1:
     st.divider()
 
     # 차량별 원가
-    st.subheader("차량별 원가현황")
+    st.subheader("차량별 원가")
     if master_df is None:
         st.info("저장된 최종 원가 마스터가 없습니다. UPLOAD 탭에서 생성 후 '최종 마스터 저장'을 눌러주세요.")
     else:

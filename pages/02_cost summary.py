@@ -450,7 +450,7 @@ def render_cost_driver_upload(settlement_year=None, settlement_month=None):
     st.markdown("##### 3-1 원가동인")
 
     uploaded_files = st.file_uploader(
-        "원가동인 파일을 업로드하세요. (AQI실적 / TS / RTLS / rtc / sm)",
+        "원가동인 업로드 (AQI실적/TS/RTLS/RTC/SM)",
         type=["xlsx", "xls"], accept_multiple_files=True, key="cost_driver_files",
     )
 
@@ -1029,7 +1029,7 @@ def render_verification_sheet_upload():
     st.markdown("##### 3-2 기간별제조원가보고서")
 
     uploaded_file = st.file_uploader(
-        "기간별제조원가보고 업로드.",
+        "기간별제조원가보고서 업로드",
         type=["xlsx", "xls"], accept_multiple_files=False, key="verification_sheet_file",
     )
 

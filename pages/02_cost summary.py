@@ -169,10 +169,10 @@ def process_opening_inventory_files(file_map, dfs):
 
 
 def render_base_upload(settlement_year, settlement_month):
-    st.header("1️⃣ 기초 DB")
+    st.header("1 원가대상")
 
     uploaded_files = st.file_uploader(
-        "파일 업로드하세요.", type=["xlsx"], accept_multiple_files=True,
+        "원가대상 업로드(기초재고/매입조회/전체상품조회/위탁수불부/복수비용_검사/복수비용_정비)", type=["xlsx"], accept_multiple_files=True,
     )
 
     dfs = initialize_base_dfs()
@@ -190,11 +190,11 @@ def render_base_upload(settlement_year, settlement_month):
         process_opening_inventory_files(file_map, dfs)
 
         st.divider()
-        st.subheader("🧾 상품ID 모음")
+        st.subheader("- 상품ID 확인")
         product_id_df = collect_product_ids(dfs, settlement_year, settlement_month)
 
         if not product_id_df.empty:
-            st.write(f"통합 데이터 건수: {len(product_id_df):,}건")
+            st.write(f"데이터 건수: {len(product_id_df):,}건")
             with st.expander("구분 포함 상세 보기"):
                 st.download_button(
                     "엑셀 다운로드",
@@ -284,24 +284,24 @@ def preprocess_purchase_cost_files(
 
 
 def render_purchase_cost_upload(product_id_df, dfs, settlement_year, settlement_month):
-    st.subheader("2-1. 매입원가")
+    st.subheader("2-1 매입원가")
 
     uploaded_cost_files = st.file_uploader(
-        "매입원가 파일을 업로드하세요.",
+        "매입원가 업로드(상품원장/재활용폐자원세액공제신고서/페이백)",
         type=["xlsx", "xls"], accept_multiple_files=True, key="cost_files",
     )
 
     if not uploaded_cost_files:
         return {}
     if len(uploaded_cost_files) > 3:
-        st.warning("원가 파일은 3개까지 업로드하는 기준으로 처리합니다.")
+        st.warning("원가 파일은 3개까지 업로드")
 
     cost_sheet_dfs = preprocess_purchase_cost_files(
         uploaded_cost_files, product_id_df, dfs, settlement_year, settlement_month,
     )
     render_sheet_workbook(
         cost_sheet_dfs,
-        "매입원가 전처리 파일 다운로드",
+        "매입원가 파일 다운로드",
         "purchase_cost_preprocessed.xlsx",
         "매입원가 파일에서 표시할 데이터가 없습니다.",
     )
@@ -313,10 +313,10 @@ def render_purchase_cost_upload(product_id_df, dfs, settlement_year, settlement_
 # ============================================================
 
 def render_manufacturing_cost_upload(product_id_df, settlement_year, settlement_month):
-    st.subheader("2-2. 제조원가")
+    st.subheader("2-2 제조원가")
 
     uploaded_files = st.file_uploader(
-        "제조원가 파일을 업로드하세요.",
+        "제조원가 업로드(재료비/노무비/부문별경비/직접경비)",
         type=["xlsx", "xls"], accept_multiple_files=True, key="manufacturing_cost_files",
     )
 
@@ -370,7 +370,7 @@ def render_manufacturing_cost_upload(product_id_df, settlement_year, settlement_
 
     render_sheet_workbook(
         manufacturing_cost_sheet_dfs,
-        "제조원가 전처리 파일 다운로드",
+        "제조원가 파일 다운로드",
         "manufacturing_cost_preprocessed.xlsx",
         "제조원가 파일에서 표시할 데이터가 없습니다.",
     )
@@ -446,7 +446,7 @@ def _match_cost_driver_keyword(filename):
 
 
 def render_cost_driver_upload(settlement_year=None, settlement_month=None):
-    st.header("3️⃣ 원가동인")
+    st.header("3 배부 기준자료")
 
     uploaded_files = st.file_uploader(
         "원가동인 파일을 업로드하세요. (AQI실적 / TS / RTLS / rtc / sm)",
@@ -1025,10 +1025,10 @@ def render_combined_cost_driver(
 # ============================================================
 
 def render_verification_sheet_upload():
-    st.header("4️⃣ 검증시트")
+    st.header("3-2 기간별제조원가보고서")
 
     uploaded_file = st.file_uploader(
-        "검증시트 파일을 업로드하세요.",
+        "기간별제조원가보고 업로드.",
         type=["xlsx", "xls"], accept_multiple_files=False, key="verification_sheet_file",
     )
 
@@ -1068,7 +1068,7 @@ def render_final_cost(
     cost_driver_dfs=None,
     combined_cost_driver_df=None,
 ):
-    st.header("5️⃣ 최종 원가 생성")
+    st.header("4 차량별 원가현황")
 
     final_cost_df = build_final_cost_df(
         product_id_df,
@@ -1128,8 +1128,8 @@ def render_final_cost(
             st.dataframe(display_diag, width="stretch")
 
     st.download_button(
-        "최종 원가 초안 다운로드",
-        data=dataframe_to_excel_bytes(final_cost_df, sheet_name="최종원가초안"),
+        "차량별 원가 다운로드",
+        data=dataframe_to_excel_bytes(final_cost_df, sheet_name="차량별원가"),
         file_name="final_cost_draft.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
@@ -1459,10 +1459,10 @@ def render_accounting_section(master_df=None):
     # 강조행: 소계/합계 (행 위치 기준)
     # ① 자동차: 기초재고0, 당기입고1, 당기출고5, 기말재고9
     _render_accounting_table("상품(자동차) 수불", tables["auto"], [0, 1, 5, 9])
-    # ② 매출구분별: 위탁매출(3)만 강조
-    _render_accounting_table("매출구분별", tables["sales"], [3])
-    # ③ 위탁: 기초재고0, 당기입고2, 당기출고4, 기말재고9
+    # ② 위탁: 기초재고0, 당기입고2, 당기출고4, 기말재고9
     _render_accounting_table("상품(위탁) 수불", tables["consign"], [0, 2, 4, 9])
+    # ③ 매출구분별: 위탁매출(3)만 강조
+    _render_accounting_table("매출구분별", tables["sales"], [3])
 
 
 tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])
@@ -1514,7 +1514,7 @@ with tab2:
     dfs, product_id_df = render_base_upload(settlement_year, settlement_month)
 
     st.divider()
-    st.header("2️⃣ 원가")
+    st.header("2 원가금액")
     purchase_cost_sheet_dfs = render_purchase_cost_upload(
         product_id_df, dfs, settlement_year, settlement_month,
     )

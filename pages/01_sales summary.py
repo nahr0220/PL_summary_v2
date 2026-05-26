@@ -98,7 +98,7 @@ with tab1:  # VIEW (매출요약정보)
                 </div>
                 """, unsafe_allow_html=True)
 
-            st.write(style_dataframe(s_p))
+            st.dataframe(style_dataframe(s_p), use_container_width=True)
 
             # 1. 기존 데이터 처리 (Melt & Pivot)
             rev = master_df.melt(id_vars=['소/도매', '판매월'], value_vars=['상품매출', '용역매출'], var_name='매출항목', value_name='금액')
@@ -124,7 +124,7 @@ with tab1:  # VIEW (매출요약정보)
                 </div>
                 """, unsafe_allow_html=True)
 
-            st.write(style_dataframe(r_p))
+            st.dataframe(style_dataframe(r_p), use_container_width=True)
 
         col1, col2 = st.columns(2)
         with col1: s_yrs = st.multiselect("판매연도", sorted(master_df['판매연도'].unique()), default=sorted(master_df['판매연도'].unique()))

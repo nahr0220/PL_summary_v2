@@ -140,7 +140,7 @@ def render_dataframe_tabs(sheet_dfs):
         with tabs[i]:
             current_df = sheet_dfs[sheet_name]
             st.write(f"건수: {len(current_df):,}건")
-            st.dataframe(dataframe_for_display(current_df), width='stretch')
+            st.dataframe(dataframe_for_display(current_df), use_container_width=True)
 
 
 def render_sheet_workbook(sheet_dfs, download_label, file_name, empty_message):
@@ -273,7 +273,7 @@ def render_base_upload(settlement_year, settlement_month):
                     file_name="product_id_detail.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
-                st.dataframe(dataframe_for_display(product_id_df), width='stretch')
+                st.dataframe(dataframe_for_display(product_id_df), use_container_width=True)
         else:
             st.info("상품ID를 가진 업로드 데이터가 아직 없습니다.")
 
@@ -1210,7 +1210,7 @@ def render_final_cost(
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     st.write(f"건수: {len(final_cost_df):,}건")
-    st.dataframe(dataframe_for_display(final_cost_df), width='stretch')
+    st.dataframe(dataframe_for_display(final_cost_df), use_container_width=True)
 
     return final_cost_df
 

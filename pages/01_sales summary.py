@@ -312,7 +312,7 @@ with tab1:  # VIEW (매출요약정보)
                     formatted_df.style
                         .apply(apply_row_style, axis=1)
                         .apply(apply_col_style, axis=0),
-                    width='stretch'
+                    use_container_width=True
                 )
 
         col_left, col_right = st.columns(2)
@@ -322,7 +322,7 @@ with tab1:  # VIEW (매출요약정보)
                 uploaded_v_file = st.file_uploader("거래처 매핑 파일 업로드 (.xlsx)", type=["xlsx"], key="vendor_uploader")
                 
                 if uploaded_v_file:
-                    if st.button("💾 거래처 데이터 교체", width='stretch', type="primary", key="btn_vendor"):
+                    if st.button("💾 거래처 데이터 교체", use_container_width=True, type="primary", key="btn_vendor"):
                         new_v_df = pd.read_excel(uploaded_v_file)
                         required_vendor_cols = ["거래처", "거래처_정정"]
                         if not all(col in new_v_df.columns for col in required_vendor_cols):
@@ -335,7 +335,7 @@ with tab1:  # VIEW (매출요약정보)
                 if os.path.exists(vendor_file):
                     vendor_df = pd.read_excel(vendor_file)
                     st.write("**현재 거래처 정보**")
-                    st.dataframe(vendor_df.rename(columns={'거래처_정정': '매입처 구분'}), width='stretch', hide_index=True)
+                    st.dataframe(vendor_df.rename(columns={'거래처_정정': '매입처 구분'}), use_container_width=True, hide_index=True)
 
         with col_right:
             with st.expander("인사 정보 관리", expanded=False):
@@ -343,7 +343,7 @@ with tab1:  # VIEW (매출요약정보)
                 uploaded_hr_file = st.file_uploader("인사 정보 파일 업로드 (.xlsx)", type=["xlsx"], key="hr_uploader")
 
                 if uploaded_hr_file:
-                    if st.button("💾 인사 데이터 교체", width='stretch', type="primary", key="btn_hr"):
+                    if st.button("💾 인사 데이터 교체", use_container_width=True, type="primary", key="btn_hr"):
                         new_hr_df = pd.read_excel(uploaded_hr_file)
                         required_hr_cols = ["팀", "팀_정정", "실", "본부", "매입구분", "상태", "도/소매", "적용달"]
                         if not all(col in new_hr_df.columns for col in required_hr_cols):
@@ -356,7 +356,7 @@ with tab1:  # VIEW (매출요약정보)
                 if os.path.exists(hr_file):
                     hr_df = pd.read_excel(hr_file)
                     st.write("**현재 인사 정보**")
-                    st.dataframe(hr_df, width='stretch', hide_index=True)
+                    st.dataframe(hr_df, use_container_width=True, hide_index=True)
 
     else:
         st.info("📂 아직 저장된 데이터가 없습니다.")
@@ -402,7 +402,7 @@ with tab2: # UPLOAD
 
         # 💡 필터링된 데이터 요약 한 줄 추가
         st.markdown(f"**선택된 데이터:** {len(final_df):,}건 │ **대변 합계:** {final_df['대변'].sum():,.0f}원")
-        st.dataframe(final_df, width='stretch')
+        st.dataframe(final_df, use_container_width=True)
         
         st.download_button(
             label=".xlsx",
@@ -431,11 +431,11 @@ with tab2: # UPLOAD
                     label=".xlsx", 
                     data=to_excel_with_format(f_df, highlight_after_col="판매연도"), 
                     file_name=f"sales_summary(확인용)_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    width='stretch'
+                    use_container_width=True
                 )
 
             with col2:
-                if st.button("마스터 파일에 저장", width='stretch', type="primary"):
+                if st.button("마스터 파일에 저장", use_container_width=True, type="primary"):
                     fname, v_err = save_to_master(f_df, verify_file=v_file)
                     if v_err:
                         st.warning(f"⚠️ 저장되었으나 검증은 스킵되었습니다.\n사유: {v_err}")

@@ -44,7 +44,7 @@ with tab1:  # VIEW (매출요약정보)
 
         col_space, col_btn = st.columns([8, 2])
         with col_btn:
-            if st.button("🗑️ 전체 데이터 초기화", type="primary", width="stretch"):
+            if st.button("🗑️ 전체 데이터 초기화", type="primary", use_container_width=True):
                 st.session_state['delete_confirm'] = True
 
             st.markdown(
@@ -55,12 +55,12 @@ with tab1:  # VIEW (매출요약정보)
         if st.session_state.get('delete_confirm'):
             c1, c2 = st.columns(2)
             with c1:
-                if st.button("✅ 삭제", width="stretch"):
+                if st.button("✅ 삭제", use_container_width=True):
                     os.remove(master_file)
                     st.session_state['delete_confirm'] = False
                     st.rerun()
             with c2:
-                if st.button("❌ 취소", width="stretch"):
+                if st.button("❌ 취소", use_container_width=True):
                     st.session_state['delete_confirm'] = False
                     st.rerun()
 
@@ -229,7 +229,7 @@ with tab1:  # VIEW (매출요약정보)
         display_cols = [col for col in d_df.columns if not col.endswith('_검증')]
         counts = d_df['매입유형1'].value_counts()
         st.markdown(f"**대수:** {len(d_df):,}대 │ **상품매출:** {d_df['상품매출'].sum():,.0f}원 │ **용역매출:** {d_df['용역매출'].sum():,.0f}원 │ **판매월:** {d_df['판매월'].min()}월 ~ {d_df['판매월'].max()}월")
-        st.dataframe(d_df[display_cols], width="stretch")
+        st.dataframe(d_df[display_cols], use_container_width=True)
         st.download_button(".xlsx", to_excel_with_format(d_df[display_cols], highlight_after_col="판매연도"), f"sales_summary_{datetime.now().strftime('%Y%m%d')}.xlsx")
 
         # 하단에 분석 및 관리 섹션 배치
@@ -377,7 +377,7 @@ with tab2: # UPLOAD
         consign_cnt = (base_df['매입유형1'] == '위탁').sum()
         product_cnt = total_cnt - consign_cnt
         st.markdown(f"**전체:** {total_cnt:,}대 │ **상품:** {product_cnt:,}대 │ **위탁:** {consign_cnt:,}대 │ **판매월:** {base_df['판매월'].min()}월 ~ {base_df['판매월'].max()}월")
-        st.dataframe(base_df, width="stretch")
+        st.dataframe(base_df, use_container_width=True)
 
     st.divider()
     st.subheader("2 계정별원장(기간별손익계산서)")
@@ -423,7 +423,7 @@ with tab2: # UPLOAD
             counts = f_df['매입유형1'].value_counts()
             st.markdown(f"**전체:** {len(f_df):,}대 │ **상품:** {len(f_df) - counts.get('위탁', 0):,}대 │ **위탁:** {counts.get('위탁', 0):,}대 │ **매출합계:** {f_df['매출합계'].sum():,.0f}원 │ **판매월:** {f_df['판매월'].min()}월 ~ {f_df['판매월'].max()}월")
             
-            st.dataframe(f_df, width="stretch")
+            st.dataframe(f_df, use_container_width=True)
             col1, col2, _ = st.columns([1, 1, 5]) 
 
             with col1:

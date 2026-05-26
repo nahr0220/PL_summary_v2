@@ -1089,7 +1089,7 @@ def render_combined_cost_driver(
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="cost_driver_combined_download",
         )
-        st.dataframe(dataframe_for_display(combined_df), width="stretch")
+        st.dataframe(dataframe_for_display(combined_df), use_container_width=True)
 
     return combined_df
 
@@ -1201,7 +1201,7 @@ def render_final_cost(
                 display_diag["단가"] = display_diag["단가"].apply(
                     lambda v: f"{v:,.4f}".rstrip("0").rstrip(".") if isinstance(v, (int, float)) else v
                 )
-            st.dataframe(display_diag, width="stretch")
+            st.dataframe(display_diag, use_container_width=True)
 
     st.download_button(
         "차량별 원가 다운로드",
@@ -1520,7 +1520,7 @@ def _render_accounting_table(title, table, highlight_rows):
             style_df.iloc[r, c] = row_style + border
 
     styler = table.style.format("{:,.0f}").apply(lambda _: style_df, axis=None)
-    st.dataframe(styler, width="stretch")
+    st.dataframe(styler, use_container_width=True)
 
 
 def render_accounting_section(master_df=None):
@@ -1565,7 +1565,7 @@ with tab1:
             file_name="final_cost_master.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        st.dataframe(dataframe_for_display(master_df), width="stretch")
+        st.dataframe(dataframe_for_display(master_df), use_container_width=True)
 
         # 데이터 초기화 (저장본 삭제)
         with st.expander("⚠️ 데이터 초기화"):

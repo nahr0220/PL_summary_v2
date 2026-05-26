@@ -521,7 +521,7 @@ def render_cost_driver_upload(settlement_year=None, settlement_month=None):
     st.markdown("##### 3-1 원가동인")
 
     uploaded_files = st.file_uploader(
-        "원가동인 파일을 업로드하세요. (AQI실적 / TS / RTLS / rtc / sm)",
+        "원가동인 업로드 (AQI실적/TS/RTLS/RTC/SM)",
         type=["xlsx", "xls"], accept_multiple_files=True, key="cost_driver_files",
     )
 
@@ -537,7 +537,7 @@ def render_cost_driver_upload(settlement_year=None, settlement_month=None):
         matched_keyword = _match_cost_driver_keyword(file.name)
         if matched_keyword is None:
             st.warning(
-                f"{file.name}: AQI실적, TS, RTLS, rtc, sm 중 하나가 파일명에 포함되어야 합니다."
+                f"{file.name}: AQI실적, TS, RTLS, RTC, SM 중 하나가 파일명에 포함되어야 합니다."
             )
             continue
 
@@ -1102,7 +1102,7 @@ def render_verification_sheet_upload():
     st.markdown("##### 3-2 기간별제조원가보고서")
 
     uploaded_file = st.file_uploader(
-        "기간별제조원가보고 업로드.",
+        "기간별제조원가보고서 업로드",
         type=["xlsx", "xls"], accept_multiple_files=False, key="verification_sheet_file",
     )
 
@@ -1537,8 +1537,8 @@ def render_accounting_section(master_df=None):
     _render_accounting_table("상품(자동차) 수불", tables["auto"], [0, 1, 5, 9])
     # ② 위탁: 기초재고0, 당기입고2, 당기출고4, 기말재고9
     _render_accounting_table("상품(위탁) 수불", tables["consign"], [0, 2, 4, 9])
-    # ③ 매출구분별: 위탁매출(3)만 강조
-    _render_accounting_table("매출구분별", tables["sales"], [3])
+    # # ③ 매출구분별: 위탁매출(3)만 강조
+    # _render_accounting_table("매출구분별", tables["sales"], [3])     # 매출구분별 표
 
 
 tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])

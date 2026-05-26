@@ -362,8 +362,8 @@ with tab1:  # VIEW (매출요약정보)
         st.info("📂 아직 저장된 데이터가 없습니다.")
 
 with tab2: # UPLOAD
-    st.header("1️⃣ sales data")
-    base_file = st.file_uploader("기준 파일 업로드", type=["xlsx"], key="base")
+    st.subheader("1 판매차량")
+    base_file = st.file_uploader("업로드 파일 ㅣ 총 1개 파일 ㅣ 손익분석", type=["xlsx"], key="base")
     if base_file:
         base_df = pd.read_excel(base_file)
         base_df["판매일자"] = pd.to_datetime(base_df["판매일자"])
@@ -380,10 +380,10 @@ with tab2: # UPLOAD
         st.dataframe(base_df, width="stretch")
 
     st.divider()
-    st.header("2️⃣ sales by account")
+    st.subheader("2 계정별원장(기간별손익계산서)")
     col_u, col_v = st.columns([7, 3])
-    with col_u: u_files = st.file_uploader("매출 파일 업로드", type=["xlsx"], accept_multiple_files=True)
-    with col_v: v_file = st.file_uploader("검증용 더존 업로드 (.xls/.xlsx)", type=["xls", "xlsx"])
+    with col_u: u_files = st.file_uploader("업로드 파일 ㅣ 총 12개 파일 ㅣ 상품매출(자동차), 수입수수료(반납취소수수료, 정보제공수수료, 상품화, 잔가옵션수수료 제외)", type=["xlsx"], accept_multiple_files=True)
+    with col_v: v_file = st.file_uploader("업로드 파일 ㅣ 기간별손익계산서 (검증용)", type=["xls", "xlsx"])
 
     if u_files and base_file:
         merged_df = preprocess_sales_data(u_files, base_df)
@@ -411,7 +411,9 @@ with tab2: # UPLOAD
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
-        if st.button("3️⃣ 최종 매출 생성", type="primary"):
+        st.divider()
+
+        if st.button("3 차량별 매출 현황 추출", type="primary"):
             st.session_state['current_final'] = build_final_report(base_df, merged_df)
 
         if 'current_final' in st.session_state:

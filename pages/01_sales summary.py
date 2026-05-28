@@ -413,7 +413,7 @@ with tab2: # UPLOAD
 
         st.divider()
 
-        if st.button("3 차량별 매출 현황 추출", type="primary"):
+        if st.button("최종 차량별 매출 현황 저장", type="primary"):
             st.session_state['current_final'] = build_final_report(base_df, merged_df)
 
         if 'current_final' in st.session_state:

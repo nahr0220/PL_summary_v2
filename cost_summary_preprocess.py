@@ -17,6 +17,7 @@ import re
 
 import numpy as np
 import pandas as pd
+from datetime import datetime
 
 
 # ============================================================
@@ -25,7 +26,7 @@ import pandas as pd
 
 DETAIL_COLUMNS = [
     "신번호", "구번호", "차대번호", "차종", "차명",
-    "반납일자", "매입일자", "분류1", "분류2", "분류3", "채널",
+    "반납일자", "매입일자", "분류1", "분류2", "분류3", "분류4",
 ]
 OUTPUT_DETAIL_COLUMNS = [*DETAIL_COLUMNS, "매입연도", "매입월"]
 
@@ -529,7 +530,7 @@ def _build_detail_frame(df, date_column):
     detail["분류1"] = _get_first_existing_column(temp, ["신매입유형1", "매입유형-분류1"])
     detail["분류2"] = _get_first_existing_column(temp, ["신매입유형2", "매입유형-분류2"])
     detail["분류3"] = _get_first_existing_column(temp, ["신매입유형3", "매입유형-분류3"])
-    detail["채널"] = _get_first_existing_column(temp, ["채널", "매입채널", "매입유형-분류4"])
+    detail["분류4"] = _get_first_existing_column(temp, ["채널", "매입채널", "매입유형-분류4"])
 
     return detail.drop_duplicates(subset=["상품ID"], keep="first").reset_index(drop=True)
 

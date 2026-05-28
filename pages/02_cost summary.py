@@ -15,6 +15,7 @@ import re
 import numpy as np
 import pandas as pd
 import streamlit as st
+from datetime import datetime
 
 from cost_summary_preprocess import (
     BASE_DF_KEYS,
@@ -1226,7 +1227,7 @@ st.title("Cost Summary")
 import os as _os
 
 MASTER_FILE_PATH = _os.path.join(
-    _os.path.dirname(_os.path.abspath(__file__)), f"sales_summary_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    _os.path.dirname(_os.path.abspath(__file__)), f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx"
 )
 MASTER_META_PATH = _os.path.join(
     _os.path.dirname(_os.path.abspath(__file__)), "final_cost_master_meta.txt"
@@ -1562,7 +1563,7 @@ with tab1:
         st.download_button(
             "최종 원가 마스터 다운로드",
             data=dataframe_to_excel_bytes(master_df, sheet_name="최종원가마스터"),
-            file_name=f"sales_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            file_name=f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         st.dataframe(dataframe_for_display(master_df), use_container_width=True)

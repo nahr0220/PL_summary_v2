@@ -185,8 +185,8 @@ with tab1:  # VIEW (매출요약정보)
 
         cond1 = d_df['매입실'] == '상품매입실'
         cond2 = d_df['매입실'] == '옥션사업실'
-        cond3 = d_df['매입팀'].str.endswith('지점')
-        cond4 = d_df['매입팀'].str.endswith('파트')
+        cond3 = d_df['매입팀'].str.endswith('지점', na=False)
+        cond4 = d_df['매입팀'].str.endswith('파트', na=False)
 
         d_df['매입구분'] = np.select(
             [cond1, cond2, cond3, cond4],

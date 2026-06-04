@@ -63,7 +63,7 @@ with tab1:  # VIEW (매출요약정보)
                 if st.button("❌ 취소", use_container_width=True):
                     st.session_state['delete_confirm'] = False
                     st.rerun()
-
+                
         order = ['소매', '도매']
         master_df['소/도매'] = pd.Categorical(master_df['소/도매'], categories=order, ordered=True)
 

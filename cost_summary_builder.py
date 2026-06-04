@@ -1774,6 +1774,23 @@ def _append_cost_group_cumulative_columns(
             + pd.to_numeric(final_df[f"{group_name}_당월"], errors="coerce").fillna(0)
         )
 
+    # 3-1) 타사차량 행은 재료비/노무비/제조경비의 누적합계/전월누적/당월 모두 0
+    if "당사/타사" in final_df.columns:
+        own_vehicle_rows = final_df["당사/타사"].astype(str).str.strip().eq("당사차량")
+        non_own = ~own_vehicle_rows
+        if non_own.any():
+            zero_columns = [
+                f"{group_name}{suffix}"
+                for group_name, _ in group_specs
+                for suffix in ("_누적합계", "_전월누적", "_당월")
+            ]
+            existing = [c for c in zero_columns if c in final_df.columns]
+            for col in existing:
+                final_df[col] = pd.to_numeric(
+                    final_df[col], errors="coerce"
+                ).fillna(0).astype(float)
+            final_df.loc[non_own, existing] = 0
+
     # 4) 제조원가 = 재료비 + 노무비 + 제조경비 (각 누적합계/전월누적/당월 합산)
     for suffix in ("_누적합계", "_전월누적", "_당월"):
         final_df[f"제조원가{suffix}"] = sum(

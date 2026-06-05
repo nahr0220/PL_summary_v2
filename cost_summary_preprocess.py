@@ -19,14 +19,13 @@ import numpy as np
 import pandas as pd
 
 
-
 # ============================================================
 # 1. 상수 정의
 # ============================================================
 
 DETAIL_COLUMNS = [
     "신번호", "구번호", "차대번호", "차종", "차명",
-    "반납일자", "매입일자", "분류1", "분류2", "분류3", "분류4",
+    "반납일자", "매입일자", "분류1", "분류2", "분류3", "채널",
 ]
 OUTPUT_DETAIL_COLUMNS = [*DETAIL_COLUMNS, "매입연도", "매입월"]
 
@@ -530,7 +529,7 @@ def _build_detail_frame(df, date_column):
     detail["분류1"] = _get_first_existing_column(temp, ["신매입유형1", "매입유형-분류1"])
     detail["분류2"] = _get_first_existing_column(temp, ["신매입유형2", "매입유형-분류2"])
     detail["분류3"] = _get_first_existing_column(temp, ["신매입유형3", "매입유형-분류3"])
-    detail["분류4"] = _get_first_existing_column(temp, ["채널", "매입채널", "매입유형-분류4"])
+    detail["채널"] = _get_first_existing_column(temp, ["채널", "매입채널", "매입유형-분류4"])
 
     return detail.drop_duplicates(subset=["상품ID"], keep="first").reset_index(drop=True)
 
@@ -584,12 +583,14 @@ def _append_vehicle_details(merged, dfs):
     use_consignment = merged["_출처"].isin(["위탁수불부_기초", "위탁수불부_입고"])
 
     for column in DETAIL_COLUMNS:
-        purchase_v = merged[f"매입_{column}"].replace("", pd.NA)
-        inventory_v = merged[f"기초_{column}"].replace("", pd.NA)
-        product_master_v = merged[f"전체_{column}"].replace("", pd.NA)
-        consignment_v = merged[f"위탁수불_{column}"].replace("", pd.NA)
-        inspection_v = merged[f"검사_{column}"].fillna("")
-        maintenance_v = merged[f"정비_{column}"].fillna("")
+        # object dtype 으로 강제 캐스팅 — combine_first 가 dtype 자동변환 시도하다
+        # to_datetime 으로 터지는 문제(pandas 신버전) 회피
+        purchase_v = merged[f"매입_{column}"].replace("", pd.NA).astype("object")
+        inventory_v = merged[f"기초_{column}"].replace("", pd.NA).astype("object")
+        product_master_v = merged[f"전체_{column}"].replace("", pd.NA).astype("object")
+        consignment_v = merged[f"위탁수불_{column}"].replace("", pd.NA).astype("object")
+        inspection_v = merged[f"검사_{column}"].fillna("").astype("object")
+        maintenance_v = merged[f"정비_{column}"].fillna("").astype("object")
 
         default_v = (
             purchase_v.combine_first(inventory_v)

@@ -261,6 +261,32 @@ def render_base_upload(settlement_year, settlement_month):
 
         process_opening_inventory_files(file_map, dfs)
 
+    # 기초재고가 비어있으면 누적 마스터에서 자동 생성 (직전월 기말_수량==1)
+    inventory_now = dfs.get("기초재고")
+    if inventory_now is None or (
+        isinstance(inventory_now, pd.DataFrame) and inventory_now.empty
+    ):
+        try:
+            from cost_summary_builder import _build_inventory_df_from_master
+            auto_inv = _build_inventory_df_from_master(
+                settlement_year, settlement_month,
+            )
+            if auto_inv is not None and not auto_inv.empty:
+                dfs["기초재고"] = auto_inv
+                dfs["기초재고_전체"] = auto_inv
+                prev_y = settlement_year - 1 if settlement_month == 1 else settlement_year
+                prev_m = 12 if settlement_month == 1 else settlement_month - 1
+                st.info(
+                    f"기초재고 파일이 업로드되지 않아 누적 마스터에서 "
+                    f"{prev_y}-{prev_m:02d} 기말 데이터를 자동으로 가져왔습니다. "
+                    f"({len(auto_inv):,}건)"
+                )
+        except Exception as exc:
+            st.warning(f"기초재고 자동 생성 중 오류: {exc}")
+
+    if uploaded_files or (
+        isinstance(dfs.get("기초재고"), pd.DataFrame) and not dfs["기초재고"].empty
+    ):
         st.divider()
         st.subheader("- 상품ID 확인")
         product_id_df = collect_product_ids(dfs, settlement_year, settlement_month)
@@ -1234,15 +1260,12 @@ MASTER_META_PATH = _os.path.join(
     _os.path.dirname(_os.path.abspath(__file__)), "final_cost_master_meta.txt"
 )
 
-# 누적 키 (이 조합이 같은 행은 새 데이터로 교체, 다른 행은 추가)
+# 누적 키: 이 조합이 같은 행은 새 데이터로 교체, 다른 행은 추가
 _MASTER_ACCUMULATION_KEYS = ["상품ID", "매출구분", "회계연도", "회계월"]
 
 
 def _find_latest_cost_summary_path():
-    """코드 폴더에서 가장 최근 cost_summary_*.xlsx 경로 반환 (없으면 None).
-
-    파일명 정렬상 마지막(날짜 큰 것)을 최신으로 본다.
-    """
+    """코드 폴더에서 가장 최근 cost_summary_*.xlsx 경로 반환 (없으면 None)."""
     here = _os.path.dirname(_os.path.abspath(__file__))
     matched = [
         p for p in _glob.glob(_os.path.join(here, "cost_summary_*.xlsx"))
@@ -1271,16 +1294,13 @@ def _read_existing_master_df():
 def _accumulate_master_data(existing_df, new_df):
     """기존 마스터에 새 데이터를 누적.
 
-    키 = (상품ID, 매출구분, 회계연도, 회계월).
-    같은 키 행은 기존에서 제거되고 새 데이터로 교체.
-    없는 키 행은 추가.
-    컬럼은 합집합 (한쪽에만 있는 컬럼은 다른 쪽에 NaN).
-    반환: (누적된 df, 기존에서 교체된 행 수)
+    키 = (상품ID, 매출구분, 회계연도, 회계월). 같은 키 행은 새 데이터로 교체.
+    없는 키 행은 추가. 컬럼은 합집합.
+    반환: (누적 df, 교체된 행 수)
     """
     if existing_df is None or existing_df.empty:
         return new_df.copy(), 0
 
-    # 키 컬럼이 한쪽에라도 없으면 누적 못 함 → 새 데이터만 반환
     for c in _MASTER_ACCUMULATION_KEYS:
         if c not in existing_df.columns or c not in new_df.columns:
             return new_df.copy(), 0
@@ -1310,7 +1330,6 @@ def _accumulate_master_data(existing_df, new_df):
     kept = existing_norm[keep_mask]
     replaced_count = int((~keep_mask).sum())
 
-    # concat 으로 합집합 컬럼 자동 처리
     result = pd.concat([kept, new_norm], ignore_index=True, sort=False)
     return result, replaced_count
 
@@ -1323,7 +1342,7 @@ def save_final_master(final_cost_df):
     3) 컬럼은 합집합으로 처리
     4) 오늘 날짜 파일(cost_summary_YYYYMMDD.xlsx) 로 저장
 
-    반환: (저장 시각 문자열, 누적 후 총 행 수, 새로 추가/교체된 행 수, 교체된 행 수)
+    반환: (저장 시각, 누적 후 총 행 수, 이번 빌드 행 수, 교체된 행 수)
     """
     saved_at = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1354,7 +1373,6 @@ def load_final_master():
     """저장된 최종원가 결과(엑셀) 불러오기. (df, 저장시각) 또는 (None, None).
 
     최신 cost_summary_*.xlsx 를 찾아 읽는다.
-    파일 수정시각 기반 캐싱으로 매 리런마다 디스크 재읽기를 피한다.
     """
     path = _find_latest_cost_summary_path()
     if path is None:
@@ -1375,7 +1393,7 @@ def load_final_master():
 
 
 def delete_final_master():
-    """저장된 모든 cost_summary_*.xlsx 파일과 메타 삭제. 삭제 성공 여부 반환."""
+    """모든 cost_summary_*.xlsx 파일과 메타 삭제. 삭제 성공 여부 반환."""
     deleted = False
     here = _os.path.dirname(_os.path.abspath(__file__))
     for path in _glob.glob(_os.path.join(here, "cost_summary_*.xlsx")):
@@ -1665,61 +1683,13 @@ with tab1:
         if master_saved_at:
             st.caption(f"마지막 저장: {master_saved_at}")
         st.write(f"건수: {len(master_df):,}건")
-
-        # 회계연도/회계월 기준으로 (연, 월) 묶음 정렬 (오름차순)
-        has_period = "회계연도" in master_df.columns and "회계월" in master_df.columns
-        if has_period:
-            ym_pairs = sorted({
-                (int(y), int(m))
-                for y, m in zip(
-                    pd.to_numeric(master_df["회계연도"], errors="coerce").dropna(),
-                    pd.to_numeric(master_df["회계월"], errors="coerce").dropna(),
-                )
-            })
-        else:
-            ym_pairs = []
-
-        # 다운로드 엑셀: 회계월마다 시트 분리 (없으면 단일 시트)
-        def _build_monthly_split_excel_bytes(df):
-            from io import BytesIO
-            buf = BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                if ym_pairs:
-                    yr_series = pd.to_numeric(df["회계연도"], errors="coerce")
-                    mo_series = pd.to_numeric(df["회계월"], errors="coerce")
-                    for y, m in ym_pairs:
-                        mask = yr_series.eq(y) & mo_series.eq(m)
-                        sub = df[mask]
-                        if sub.empty:
-                            continue
-                        sheet_name = f"{y}-{m:02d}"
-                        sub.to_excel(writer, index=False, sheet_name=sheet_name)
-                else:
-                    df.to_excel(writer, index=False, sheet_name="최종원가마스터")
-            return buf.getvalue()
-
         st.download_button(
             "최종 원가 마스터 다운로드",
-            data=_build_monthly_split_excel_bytes(master_df),
+            data=dataframe_to_excel_bytes(master_df, sheet_name="최종원가마스터"),
             file_name=f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-
-        # 화면 표시: 회계월별 탭 (오름차순)
-        if ym_pairs:
-            tab_labels = [f"{y}-{m:02d}" for y, m in ym_pairs]
-            monthly_tabs = st.tabs(tab_labels)
-            yr_series = pd.to_numeric(master_df["회계연도"], errors="coerce")
-            mo_series = pd.to_numeric(master_df["회계월"], errors="coerce")
-            for (y, m), tab_obj in zip(ym_pairs, monthly_tabs):
-                with tab_obj:
-                    mask = yr_series.eq(y) & mo_series.eq(m)
-                    sub = master_df[mask]
-                    st.caption(f"{y}-{m:02d} · {len(sub):,}건")
-                    st.dataframe(dataframe_for_display(sub), use_container_width=True)
-        else:
-            # 회계연/월 컬럼이 없으면 기존 그대로
-            st.dataframe(dataframe_for_display(master_df), use_container_width=True)
+        st.dataframe(dataframe_for_display(master_df), use_container_width=True)
 
         # 데이터 초기화 (저장본 삭제)
         with st.expander("⚠️ 데이터 초기화"):

@@ -1430,6 +1430,127 @@ def _load_master_pnl_product_id_counts(settlement_year=None, settlement_month=No
     return result
 
 
+# ============================================================
+# 누적 마스터에서 직전월 기초재고 자동 생성
+# ============================================================
+
+# 마스터의 누적합계 컬럼 → 기초재고 시트의 _전월 컬럼 매핑
+_MASTER_TO_INVENTORY_COLUMN_MAP = {
+    "상품매입액_누적합계": "상품매입액_전월",
+    "취득세_누적합계": "취득세_전월",
+    "매입수수료_누적합계": "매입수수료_전월",
+    "폐자원공제_누적합계": "폐자원공제_전월",
+    "초과운행_누적합계": "초과운행_전월",
+    "차액배부_누적합계": "차액배부_전월",
+    "페이백(반납)_누적합계": "페이백(반납)_전월",
+    "페이백(미반납)_누적합계": "페이백(미반납)_전월",
+    "재료비_누적합계": "재료비_전월",
+    "노무비_누적합계": "노무비_전월",
+    "제조경비_누적합계": "제조경비_전월",
+    "매출원가_누적합계": "매출원가_전월",
+}
+
+
+def _find_latest_cost_summary_path():
+    """코드 폴더 / 상위 / 현재에서 가장 최근 cost_summary_*.xlsx 경로 반환 (없으면 None)."""
+    import os
+    import glob
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    search_dirs = [here, os.path.join(here, ".."), "."]
+    matched = []
+    for d in search_dirs:
+        try:
+            for p in glob.glob(os.path.join(d, "cost_summary_*.xlsx")):
+                if os.path.exists(p) and os.path.getsize(p) > 0:
+                    matched.append(p)
+        except Exception:
+            pass
+    if not matched:
+        return None
+    matched = sorted(set(matched), key=lambda p: os.path.basename(p), reverse=True)
+    return matched[0]
+
+
+def _build_inventory_df_from_master(settlement_year, settlement_month):
+    """누적 마스터에서 직전월 데이터를 추출해 기초재고 시트 형식의 df 반환.
+
+    1) settlement_year/month 의 직전월 계산 (1월→전년 12월)
+    2) 최신 cost_summary_*.xlsx 읽기 (없으면 None)
+    3) 마스터에서 (회계연도, 회계월) == 직전월 행 중 기말_수량 == 1 인 행 필터
+    4) 컬럼 매핑: 누적합계 → _전월
+    5) {전월}월 기말여부 = 1 으로 추가
+
+    반환: 기초재고 형식의 DataFrame (없거나 빈 결과면 None)
+    """
+    if settlement_year is None or settlement_month is None:
+        return None
+
+    settle_year = int(settlement_year)
+    settle_month = int(settlement_month)
+    if settle_month == 1:
+        prev_year, prev_month = settle_year - 1, 12
+    else:
+        prev_year, prev_month = settle_year, settle_month - 1
+
+    path = _find_latest_cost_summary_path()
+    if path is None:
+        return None
+    try:
+        master_df = pd.read_excel(path, sheet_name="최종원가마스터")
+    except Exception:
+        try:
+            master_df = pd.read_excel(path)
+        except Exception:
+            return None
+
+    if master_df is None or master_df.empty:
+        return None
+
+    # 회계연도/회계월 필터
+    if "회계연도" not in master_df.columns or "회계월" not in master_df.columns:
+        return None
+
+    yr = pd.to_numeric(master_df["회계연도"], errors="coerce")
+    mo = pd.to_numeric(master_df["회계월"], errors="coerce")
+    prev_mask = yr.eq(prev_year) & mo.eq(prev_month)
+    prev_rows = master_df[prev_mask].copy()
+    if prev_rows.empty:
+        return None
+
+    # 기말_수량 == 1 만 추출
+    if "기말_수량" in prev_rows.columns:
+        prev_rows["기말_수량"] = pd.to_numeric(
+            prev_rows["기말_수량"], errors="coerce"
+        ).fillna(0)
+        prev_rows = prev_rows[prev_rows["기말_수량"].eq(1)]
+    if prev_rows.empty:
+        return None
+
+    # 기초재고 시트 형식으로 변환
+    inv = pd.DataFrame()
+
+    # 상품ID 보존
+    if "상품ID" in prev_rows.columns:
+        inv["상품ID"] = prev_rows["상품ID"].astype(str).str.strip()
+    else:
+        return None
+
+    # 컬럼 매핑 적용
+    for master_col, inventory_col in _MASTER_TO_INVENTORY_COLUMN_MAP.items():
+        if master_col in prev_rows.columns:
+            inv[inventory_col] = pd.to_numeric(
+                prev_rows[master_col], errors="coerce"
+            ).fillna(0)
+        else:
+            inv[inventory_col] = 0
+
+    # {전월}월 기말여부 = 1 (빌더가 이 컬럼으로 전월 기말 행 필터)
+    inv[f"{prev_month}월 기말여부"] = 1
+
+    return inv.reset_index(drop=True)
+
+
 def _build_consignment_outbound_counts(consignment_ledger_df, settlement_month):
     """위탁수불부에서 상품ID별 출고==1 개수 반환.
 
@@ -2147,6 +2268,16 @@ def build_final_cost_df(
 
     if final_df.empty:
         return final_df
+
+    # 기초재고가 비어 있으면 누적 마스터에서 직전월 자동 생성
+    if inventory_df is None or (
+        isinstance(inventory_df, pd.DataFrame) and inventory_df.empty
+    ):
+        auto_inventory = _build_inventory_df_from_master(
+            settlement_year, settlement_month,
+        )
+        if auto_inventory is not None and not auto_inventory.empty:
+            inventory_df = auto_inventory
 
     reorder_kwargs = dict(
         manufacturing_cost_sheet_dfs=manufacturing_cost_sheet_dfs,

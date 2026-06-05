@@ -1225,6 +1225,7 @@ st.title("Cost Summary")
 
 # 최종 마스터 저장 경로 (코드와 같은 폴더, 서버 공용)
 import os as _os
+import glob as _glob
 
 MASTER_FILE_PATH = _os.path.join(
     _os.path.dirname(_os.path.abspath(__file__)), f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx"
@@ -1233,15 +1234,111 @@ MASTER_META_PATH = _os.path.join(
     _os.path.dirname(_os.path.abspath(__file__)), "final_cost_master_meta.txt"
 )
 
+# 누적 키 (이 조합이 같은 행은 새 데이터로 교체, 다른 행은 추가)
+_MASTER_ACCUMULATION_KEYS = ["상품ID", "매출구분", "회계연도", "회계월"]
+
+
+def _find_latest_cost_summary_path():
+    """코드 폴더에서 가장 최근 cost_summary_*.xlsx 경로 반환 (없으면 None).
+
+    파일명 정렬상 마지막(날짜 큰 것)을 최신으로 본다.
+    """
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    matched = [
+        p for p in _glob.glob(_os.path.join(here, "cost_summary_*.xlsx"))
+        if _os.path.exists(p) and _os.path.getsize(p) > 0
+    ]
+    if not matched:
+        return None
+    matched.sort(key=lambda p: _os.path.basename(p), reverse=True)
+    return matched[0]
+
+
+def _read_existing_master_df():
+    """최신 cost_summary_*.xlsx 를 읽어 반환 (없으면 None)."""
+    path = _find_latest_cost_summary_path()
+    if path is None:
+        return None
+    try:
+        return pd.read_excel(path, sheet_name="최종원가마스터")
+    except Exception:
+        try:
+            return pd.read_excel(path)
+        except Exception:
+            return None
+
+
+def _accumulate_master_data(existing_df, new_df):
+    """기존 마스터에 새 데이터를 누적.
+
+    키 = (상품ID, 매출구분, 회계연도, 회계월).
+    같은 키 행은 기존에서 제거되고 새 데이터로 교체.
+    없는 키 행은 추가.
+    컬럼은 합집합 (한쪽에만 있는 컬럼은 다른 쪽에 NaN).
+    반환: (누적된 df, 기존에서 교체된 행 수)
+    """
+    if existing_df is None or existing_df.empty:
+        return new_df.copy(), 0
+
+    # 키 컬럼이 한쪽에라도 없으면 누적 못 함 → 새 데이터만 반환
+    for c in _MASTER_ACCUMULATION_KEYS:
+        if c not in existing_df.columns or c not in new_df.columns:
+            return new_df.copy(), 0
+
+    def _normalize_keys(df):
+        df = df.copy()
+        for c in ["상품ID", "매출구분"]:
+            df[c] = df[c].astype(str).str.strip()
+        for c in ["회계연도", "회계월"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        return df
+
+    existing_norm = _normalize_keys(existing_df)
+    new_norm = _normalize_keys(new_df)
+
+    new_keys = set(zip(
+        new_norm["상품ID"], new_norm["매출구분"],
+        new_norm["회계연도"], new_norm["회계월"],
+    ))
+    existing_keys = list(zip(
+        existing_norm["상품ID"], existing_norm["매출구분"],
+        existing_norm["회계연도"], existing_norm["회계월"],
+    ))
+    keep_mask = pd.Series(
+        [k not in new_keys for k in existing_keys], index=existing_norm.index,
+    )
+    kept = existing_norm[keep_mask]
+    replaced_count = int((~keep_mask).sum())
+
+    # concat 으로 합집합 컬럼 자동 처리
+    result = pd.concat([kept, new_norm], ignore_index=True, sort=False)
+    return result, replaced_count
+
 
 def save_final_master(final_cost_df):
-    """최종원가 결과를 서버 엑셀 파일로 저장 (공용). 성공 시 저장 시각 문자열 반환."""
+    """최종원가 결과를 누적해 서버 엑셀 파일로 저장 (공용).
+
+    1) 최신 cost_summary_*.xlsx 를 읽어 기존 마스터로 사용 (없으면 빈 시작)
+    2) 같은 (상품ID, 매출구분, 회계연도, 회계월) 행 교체 + 나머지 추가
+    3) 컬럼은 합집합으로 처리
+    4) 오늘 날짜 파일(cost_summary_YYYYMMDD.xlsx) 로 저장
+
+    반환: (저장 시각 문자열, 누적 후 총 행 수, 새로 추가/교체된 행 수, 교체된 행 수)
+    """
     saved_at = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-    with pd.ExcelWriter(MASTER_FILE_PATH, engine="openpyxl") as writer:
-        final_cost_df.to_excel(writer, index=False, sheet_name="최종원가마스터")
+
+    existing = _read_existing_master_df()
+    merged, replaced = _accumulate_master_data(existing, final_cost_df)
+
+    today_path = _os.path.join(
+        _os.path.dirname(_os.path.abspath(__file__)),
+        f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
+    )
+    with pd.ExcelWriter(today_path, engine="openpyxl") as writer:
+        merged.to_excel(writer, index=False, sheet_name="최종원가마스터")
     with open(MASTER_META_PATH, "w", encoding="utf-8") as f:
         f.write(saved_at)
-    return saved_at
+    return saved_at, len(merged), len(final_cost_df), replaced
 
 
 @st.cache_data(show_spinner=False)
@@ -1256,13 +1353,15 @@ def _read_master_excel_cached(path, mtime):
 def load_final_master():
     """저장된 최종원가 결과(엑셀) 불러오기. (df, 저장시각) 또는 (None, None).
 
+    최신 cost_summary_*.xlsx 를 찾아 읽는다.
     파일 수정시각 기반 캐싱으로 매 리런마다 디스크 재읽기를 피한다.
     """
-    if not _os.path.exists(MASTER_FILE_PATH):
+    path = _find_latest_cost_summary_path()
+    if path is None:
         return None, None
     try:
-        mtime = _os.path.getmtime(MASTER_FILE_PATH)
-        df = _read_master_excel_cached(MASTER_FILE_PATH, mtime)
+        mtime = _os.path.getmtime(path)
+        df = _read_master_excel_cached(path, mtime)
     except Exception:
         return None, None
     saved_at = None
@@ -1276,13 +1375,19 @@ def load_final_master():
 
 
 def delete_final_master():
-    """저장된 최종원가 마스터 파일과 메타 삭제. 삭제 성공 여부 반환."""
+    """저장된 모든 cost_summary_*.xlsx 파일과 메타 삭제. 삭제 성공 여부 반환."""
     deleted = False
-    for path in (MASTER_FILE_PATH, MASTER_META_PATH):
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    for path in _glob.glob(_os.path.join(here, "cost_summary_*.xlsx")):
         try:
-            if _os.path.exists(path):
-                _os.remove(path)
-                deleted = True
+            _os.remove(path)
+            deleted = True
+        except Exception:
+            pass
+    if _os.path.exists(MASTER_META_PATH):
+        try:
+            _os.remove(MASTER_META_PATH)
+            deleted = True
         except Exception:
             pass
     return deleted
@@ -1560,13 +1665,61 @@ with tab1:
         if master_saved_at:
             st.caption(f"마지막 저장: {master_saved_at}")
         st.write(f"건수: {len(master_df):,}건")
+
+        # 회계연도/회계월 기준으로 (연, 월) 묶음 정렬 (오름차순)
+        has_period = "회계연도" in master_df.columns and "회계월" in master_df.columns
+        if has_period:
+            ym_pairs = sorted({
+                (int(y), int(m))
+                for y, m in zip(
+                    pd.to_numeric(master_df["회계연도"], errors="coerce").dropna(),
+                    pd.to_numeric(master_df["회계월"], errors="coerce").dropna(),
+                )
+            })
+        else:
+            ym_pairs = []
+
+        # 다운로드 엑셀: 회계월마다 시트 분리 (없으면 단일 시트)
+        def _build_monthly_split_excel_bytes(df):
+            from io import BytesIO
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                if ym_pairs:
+                    yr_series = pd.to_numeric(df["회계연도"], errors="coerce")
+                    mo_series = pd.to_numeric(df["회계월"], errors="coerce")
+                    for y, m in ym_pairs:
+                        mask = yr_series.eq(y) & mo_series.eq(m)
+                        sub = df[mask]
+                        if sub.empty:
+                            continue
+                        sheet_name = f"{y}-{m:02d}"
+                        sub.to_excel(writer, index=False, sheet_name=sheet_name)
+                else:
+                    df.to_excel(writer, index=False, sheet_name="최종원가마스터")
+            return buf.getvalue()
+
         st.download_button(
             "최종 원가 마스터 다운로드",
-            data=dataframe_to_excel_bytes(master_df, sheet_name="최종원가마스터"),
+            data=_build_monthly_split_excel_bytes(master_df),
             file_name=f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
-        st.dataframe(dataframe_for_display(master_df), use_container_width=True)
+
+        # 화면 표시: 회계월별 탭 (오름차순)
+        if ym_pairs:
+            tab_labels = [f"{y}-{m:02d}" for y, m in ym_pairs]
+            monthly_tabs = st.tabs(tab_labels)
+            yr_series = pd.to_numeric(master_df["회계연도"], errors="coerce")
+            mo_series = pd.to_numeric(master_df["회계월"], errors="coerce")
+            for (y, m), tab_obj in zip(ym_pairs, monthly_tabs):
+                with tab_obj:
+                    mask = yr_series.eq(y) & mo_series.eq(m)
+                    sub = master_df[mask]
+                    st.caption(f"{y}-{m:02d} · {len(sub):,}건")
+                    st.dataframe(dataframe_for_display(sub), use_container_width=True)
+        else:
+            # 회계연/월 컬럼이 없으면 기존 그대로
+            st.dataframe(dataframe_for_display(master_df), use_container_width=True)
 
         # 데이터 초기화 (저장본 삭제)
         with st.expander("⚠️ 데이터 초기화"):
@@ -1624,7 +1777,12 @@ with tab2:
     st.divider()
     if final_cost_df is not None and not final_cost_df.empty:
         if st.button("💾 최종 마스터 저장", key="save_final_master", type="primary"):
-            saved_at = save_final_master(final_cost_df)
-            st.success(f"최종 마스터가 저장되었습니다. ({saved_at}) VIEW 탭에서 확인하세요.")
+            saved_at, total_rows, new_rows, replaced_rows = save_final_master(final_cost_df)
+            added_rows = new_rows - replaced_rows
+            st.success(
+                f"최종 마스터가 저장되었습니다. ({saved_at})\n\n"
+                f"이번 빌드: {new_rows:,}건 (신규 추가 {added_rows:,}건, 기존 교체 {replaced_rows:,}건)\n"
+                f"누적 마스터 총 {total_rows:,}건. VIEW 탭에서 확인하세요."
+            )
     else:
         st.caption("최종 원가 데이터가 생성되면 '최종 마스터 저장' 버튼이 활성화됩니다.")

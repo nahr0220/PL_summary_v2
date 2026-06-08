@@ -27,6 +27,35 @@ def preprocess_sales_data(uploaded_files, base_df):
     # 1️⃣ 분류 로직
     merged_df["분류"] = merged_df["계정명"].str.extract(r"\((.*?)\)")
     merged_df.loc[merged_df["계정명"] == "상품매출(자동차)", "분류"] = "상품매출"
+
+    # 리본케어플러스 세분화
+    mask_ribbon = merged_df["계정명"] == "수입수수료(리본케어플러스)"
+    cancel_ribbon_words = "환불|판매 취소|판매취소"
+
+    merged_df.loc[
+        mask_ribbon & merged_df["적요"].str.contains(cancel_ribbon_words, na=False),
+        "분류"
+    ] = "리본케어플러스_판매취소"
+
+    merged_df.loc[
+        mask_ribbon & ~merged_df["적요"].str.contains(cancel_ribbon_words, na=False),
+        "분류"
+    ] = "리본케어플러스"
+
+
+    # 탁송비 세분화
+    mask_delivery = merged_df["계정명"] == "수입수수료(탁송비)"
+    cancel_delivery_words = "환불|판매취소|판매 취소"
+
+    merged_df.loc[
+        mask_delivery & merged_df["적요"].str.contains(cancel_delivery_words, na=False),
+        "분류"
+    ] = "탁송비_판매취소"
+
+    merged_df.loc[
+        mask_delivery & ~merged_df["적요"].str.contains(cancel_delivery_words, na=False),
+        "분류"
+    ] = "탁송비"
     
     # 위탁판매수수료 세분화
     mask_consign = merged_df["계정명"] == "수입수수료(위탁판매수수료)"
@@ -46,6 +75,8 @@ def preprocess_sales_data(uploaded_files, base_df):
     merged_df.loc[mask_auc & merged_df["적요"].str.contains("자산|LC", na=False), "분류"] = "낙찰수수료_자산"
     merged_df.loc[mask_auc & merged_df["적요"].str.contains("외부|위탁", na=False), "분류"] = "낙찰수수료_외부출품"
     merged_df.loc[mask_auc & ~merged_df["적요"].str.contains(cancel_words + "|자산|LC|외부|위탁", na=False), "분류"] = "낙찰수수료"
+
+
 
     # 2️⃣ 차량번호 추출
     unit_pattern = r'(?:(?:서울|부산|대구|인천|광주|대전|울산|경기)?\d{2,3}[가-힣]\d{4}|지게차)'

@@ -137,11 +137,30 @@ def save_to_master(new_df, verify_file=None, file_name="master_pnl.xlsx"):
                         new_df.loc[new_df['판매월'] == m, f"{item}_검증"] = abs(calc_val - actual_val) < 100
         except Exception as e:
             verify_error = str(e)
-
+    # 기존코드
+    # if os.path.exists(file_name):
+    #     old_df = pd.read_excel(file_name)
+    #     combined_df = pd.concat([old_df, new_df], ignore_index=True)
+    #     combined_df = combined_df.drop_duplicates(subset=['상품ID'], keep='last')
+    # else:
+    #     combined_df = new_df
+    # 해당월만 새로 업데이트로 수정
     if os.path.exists(file_name):
         old_df = pd.read_excel(file_name)
+
+        # 판매월 컬럼 숫자형 정리
+        old_df["판매월"] = pd.to_numeric(old_df["판매월"], errors="coerce")
+        new_df["판매월"] = pd.to_numeric(new_df["판매월"], errors="coerce")
+
+        # 새 데이터에 포함된 판매월 목록 추출
+        update_months = new_df["판매월"].dropna().unique()
+
+        # 기존 데이터에서 새 데이터에 포함된 판매월 삭제
+        old_df = old_df[~old_df["판매월"].isin(update_months)]
+
+        # 기존 데이터 + 새 데이터 결합
         combined_df = pd.concat([old_df, new_df], ignore_index=True)
-        combined_df = combined_df.drop_duplicates(subset=['상품ID'], keep='last')
+
     else:
         combined_df = new_df
 

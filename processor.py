@@ -94,7 +94,7 @@ def preprocess_sales_data(uploaded_files, base_df):
     merged_df.loc[mask_check, "상품ID"] = "확인필요"
 
     # 지게차/일반 차량 매핑
-    mask_forklift = merged_df["차량번호"] == "지게차"
+    mask_forklift = merged_df["계정명"] == "상품매출(자동차)"
     merged_df.loc[mask_forklift, "상품ID"] = merged_df.loc[mask_forklift, "적요"].str[:12]
 
     lookup_map = {**old_map, **new_map}

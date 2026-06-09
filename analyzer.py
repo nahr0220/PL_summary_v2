@@ -45,6 +45,83 @@ def distribute_indirect_cost(df, merged_df, category_name, col_name, target_mask
     df[col_name] = df[f"{col_name}_직"] + df[f"{col_name}_간"]
     return df
 
+def enrich_vendor_hr(df, vendor_df=None, hr_df=None):
+    """저장 직전 f_df에 거래처(매입처 구분)·인사정보(매입/판매 본부·실·팀·담당)를 결합한다.
+    인사정보는 판매연도/판매월(해당 월 1일) 기준으로 적용시점 <= 판매기준일 중 최신 행을 매칭."""
+    df = df.copy()
+
+    # === 거래처(매입처 구분) ===
+    if vendor_df is not None and not vendor_df.empty:
+        v_map = vendor_df.drop_duplicates("거래처")
+        df = df.drop(columns=["거래처_정정", "매입처 구분", "거래처"], errors="ignore")
+        df = df.merge(v_map[["거래처", "거래처_정정"]], left_on="매입처", right_on="거래처", how="left")
+        df = df.drop(columns=["거래처"], errors="ignore")
+        df = df.rename(columns={"거래처_정정": "매입처 구분"})
+        df["매입처 구분"] = df["매입처 구분"].fillna("기타")
+
+    # 구분자 컬럼 (위치는 함수 끝에서 '계약서' 뒤로 재배치)
+    df = df.drop(columns=[">>컬럼구분>>"], errors="ignore")
+    df[">>컬럼구분>>"] = ""
+
+    # === 인사정보 (적용시점 기준 merge_asof) ===
+    if hr_df is not None and not hr_df.empty:
+        hr_df = hr_df.copy()
+        hr_df["적용시점"] = pd.to_datetime(hr_df["적용시점"])
+        hr_sorted = hr_df[["적용시점", "팀", "본부", "실", "팀_정정"]].sort_values("적용시점")
+
+        df = df.drop(columns=["매입본부", "매입실", "매입팀", "판매본부2", "판매실", "판매팀"], errors="ignore")
+        df["_판매기준일"] = pd.to_datetime(
+            df["판매연도"].astype(str) + "-" + df["판매월"].astype(str).str.zfill(2) + "-01"
+        )
+
+        # 매입지점 매칭
+        df = df.sort_values("_판매기준일").reset_index(drop=True)
+        df = pd.merge_asof(
+            df, hr_sorted, left_on="_판매기준일", right_on="적용시점",
+            left_by="매입지점", right_by="팀", direction="backward"
+        )
+        df = df.rename(columns={"본부": "매입본부", "실": "매입실", "팀_정정": "매입팀"})
+        df = df.drop(columns=["팀", "적용시점"], errors="ignore")
+
+        df.loc[df["매입유형1"] == "자산", ["매입팀"]] = "자산"
+        df["매입담당"] = df["매입사원"]
+
+        cond1 = df["매입실"] == "상품매입실"
+        cond2 = df["매입실"] == "옥션사업실"
+        cond3 = df["매입팀"].str.endswith("지점", na=False)
+        cond4 = df["매입팀"].str.endswith("파트", na=False)
+        df["매입구분"] = np.select(
+            [cond1, cond2, cond3, cond4],
+            ["상품매입실", "기타", "지점", "지점"],
+            default="기타"
+        )
+
+        # 판매지점 매칭
+        df = df.sort_values("_판매기준일").reset_index(drop=True)
+        df = pd.merge_asof(
+            df, hr_sorted, left_on="_판매기준일", right_on="적용시점",
+            left_by="판매지점", right_by="팀", direction="backward"
+        )
+        df = df.rename(columns={"본부": "판매본부2", "실": "판매실", "팀_정정": "판매팀"})
+        df = df.drop(columns=["팀", "적용시점", "_판매기준일"], errors="ignore")
+
+        cond1 = df["소/도매"] == "도매"
+        cond2 = df["판매방식"].isin(["기타/지점도매", "도매/도매", "도매/경매"])
+        df["판매담당"] = np.select(
+            [cond1, cond2],
+            [df["판매팀"], "#지점도매"],
+            default=df["판매사원"]
+        )
+
+    # 구분자 컬럼을 '계약서' 바로 뒤로 이동 ('계약서'가 없으면 현재 위치 유지)
+    if ">>컬럼구분>>" in df.columns and "계약서" in df.columns:
+        cols = [c for c in df.columns if c != ">>컬럼구분>>"]
+        idx = cols.index("계약서") + 1
+        cols = cols[:idx] + [">>컬럼구분>>"] + cols[idx:]
+        df = df[cols]
+
+    return df
+
 def build_final_report(base_df, merged_df):
     # col = ['매입가', '매입원가', '매입부가세', '폐자원공제액', '상품화비용', '판매가', '판매원가', '판매부가세', '매출액', 
     #        '매출이익', '매도비', '낙찰수수료', '매도비/낙찰수수료', '연장보증료', '찾아서', '추가상품', '성능보험료', '매출이익(목표기준)', 
@@ -108,6 +185,7 @@ def save_to_master(new_df, verify_file=None, file_name="master_pnl.xlsx"):
     
     for item in name_map.keys():
         new_df[f"{item}_검증"] = True
+        new_df[f"{item}_검증값"] = np.nan   # 검증파일 실제값 (없으면 NaN)
 
     verify_error = None
     if verify_file is not None:
@@ -135,6 +213,7 @@ def save_to_master(new_df, verify_file=None, file_name="master_pnl.xlsx"):
                         calc_val = new_df[new_df['판매월'] == m][item].sum()
                         actual_val = pd.to_numeric(v_row[v_col], errors='coerce').sum()
                         new_df.loc[new_df['판매월'] == m, f"{item}_검증"] = abs(calc_val - actual_val) < 100
+                        new_df.loc[new_df['판매월'] == m, f"{item}_검증값"] = actual_val
         except Exception as e:
             verify_error = str(e)
     # 기존코드
@@ -163,6 +242,18 @@ def save_to_master(new_df, verify_file=None, file_name="master_pnl.xlsx"):
 
     else:
         combined_df = new_df
+
+    # '>>컬럼구분>>'를 '계약서' 바로 뒤로 강제 정렬 (기존 master 순서에 영향받지 않도록)
+    if ">>컬럼구분>>" in combined_df.columns and "계약서" in combined_df.columns:
+        cols = [c for c in combined_df.columns if c != ">>컬럼구분>>"]
+        idx = cols.index("계약서") + 1
+        cols = cols[:idx] + [">>컬럼구분>>"] + cols[idx:]
+        combined_df = combined_df[cols]
+
+    # 'updated_at'은 항상 맨 마지막 컬럼으로
+    if "updated_at" in combined_df.columns:
+        cols = [c for c in combined_df.columns if c != "updated_at"] + ["updated_at"]
+        combined_df = combined_df[cols]
 
     combined_df.to_excel(file_name, index=False)
     return file_name, verify_error

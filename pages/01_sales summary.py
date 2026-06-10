@@ -33,6 +33,26 @@ def load_mapping_file(uploaded, master_path, required_cols, label):
         return pd.read_excel(master_path)
     return None
 
+HR_COLUMN_NAMES = ['결산월', '관리용 코드', '대표이사', '본부', '실', '팀', '파트', '팀명', '매입구분', '구분자', '도소매구분', '관리명', '예외']
+
+def load_hr_file(uploaded, master_path):
+    """인사정보 파일: header=1, 앞 13개 컬럼만 사용하고 지정 컬럼명으로 맞춘다.
+    업로드 시 정리된 형태로 저장(이후 fallback은 정리본을 header=0으로 읽음)."""
+    if uploaded is not None:
+        raw = pd.read_excel(uploaded, header=1)
+        raw = raw.iloc[:, :13]
+        raw.columns = HR_COLUMN_NAMES[:raw.shape[1]]
+        need = ['결산월', '팀', '본부', '실', '관리명']
+        missing = [c for c in need if c not in raw.columns]
+        if missing:
+            st.error(f"❌ 인사정보 필수 컬럼 누락 (header=1·13열 확인): {', '.join(missing)}")
+            return None
+        raw.to_excel(master_path, index=False)
+        return raw
+    if os.path.exists(master_path):
+        return pd.read_excel(master_path)
+    return None
+
 def render_douzone_pl(source_df, key_prefix="pl"):
     """더존 PL 피벗 표시. {item}_검증 컬럼이 있으면(=저장 후) ✅/❌ 아이콘 표시,
     {item}_검증값이 있으면 PL계산 vs 검증파일 + 차액 상세표도 표시."""
@@ -296,7 +316,7 @@ with tab1:  # VIEW (매출요약정보)
         st.info("📂 아직 저장된 데이터가 없습니다.")
 
 with tab2: # UPLOAD
-    st.subheader("1 판매차량")
+    st.markdown('<div style="font-size:20px; font-weight:bold;">판매차량</div>', unsafe_allow_html=True)
     base_file = st.file_uploader("업로드 파일 ㅣ 총 1개 파일 ㅣ 손익분석", type=["xlsx"], key="base")
     if base_file:
         base_df = pd.read_excel(base_file)
@@ -314,37 +334,13 @@ with tab2: # UPLOAD
         st.dataframe(base_df, use_container_width=True)
 
     st.divider()
-    st.subheader("2 계정별원장(기간별손익계산서)")
-    col_u, col_v = st.columns([7, 3])
-    with col_u: u_files = st.file_uploader("업로드 파일 ㅣ 총 12개 파일 ㅣ 상품매출(자동차), 수입수수료(반납취소수수료, 정보제공수수료, 상품화, 잔가옵션수수료 제외)", type=["xlsx"], accept_multiple_files=True)
+    head2_l, head2_r = st.columns([8, 2])
+    with head2_l:
+        st.markdown('<div style="font-size:20px; font-weight:bold;">계정별원장(기간별손익계산서)</div>', unsafe_allow_html=True)
+    dl_slot_account = head2_r.empty()  # 제목 우측 엑셀 다운로드 버튼 자리
+    col_u, col_v = st.columns(2)
+    with col_u: u_files = st.file_uploader("업로드 파일 ㅣ 총 12개 파일 ㅣ 상품매출(자동차), 수입수수료(반납취소, 정보제공, 상품화, 잔가옵션 제외)", type=["xlsx"], accept_multiple_files=True)
     with col_v: v_file = st.file_uploader("업로드 파일 ㅣ 기간별손익계산서 (검증용)", type=["xls", "xlsx"])
-
-    st.divider()
-    st.subheader("3 매핑정보 (거래처 · 인사)")
-    col_vendor, col_hr = st.columns(2)
-    with col_vendor:
-        up_vendor = st.file_uploader("거래처 매핑 (.xlsx) ㅣ 거래처, 거래처_정정", type=["xlsx"], key="vendor_up")
-    with col_hr:
-        up_hr = st.file_uploader("인사정보 (.xlsx) ㅣ 적용시점, 팀, 본부, 실, 팀_정정", type=["xlsx"], key="hr_up")
-
-    # 업로드 시 master_vendor/master_hr 로 저장하고, 없으면 기존 저장본 사용
-    vendor_df = load_mapping_file(up_vendor, "master_vendor.xlsx", ["거래처", "거래처_정정"], "거래처")
-    hr_df = load_mapping_file(up_hr, "master_hr.xlsx", ["적용시점", "팀", "본부", "실", "팀_정정"], "인사정보")
-
-    with st.expander("현재 적용 중인 매핑 보기", expanded=False):
-        c1, c2 = st.columns(2)
-        with c1:
-            st.write("**거래처**")
-            if vendor_df is not None:
-                st.dataframe(vendor_df.rename(columns={'거래처_정정': '매입처 구분'}), use_container_width=True, hide_index=True)
-            else:
-                st.caption("등록된 거래처 매핑이 없습니다.")
-        with c2:
-            st.write("**인사정보**")
-            if hr_df is not None:
-                st.dataframe(hr_df, use_container_width=True, hide_index=True)
-            else:
-                st.caption("등록된 인사정보가 없습니다.")
 
     if u_files and base_file:
         merged_df = preprocess_sales_data(u_files, base_df)
@@ -364,19 +360,54 @@ with tab2: # UPLOAD
         # 💡 필터링된 데이터 요약 한 줄 추가
         st.markdown(f"**선택된 데이터:** {len(final_df):,}건 │ **대변 합계:** {final_df['대변'].sum():,.0f}원")
         st.dataframe(final_df, use_container_width=True)
-        
-        st.download_button(
-            label=".xlsx",
+
+        dl_slot_account.download_button(
+            label="엑셀 다운로드",
             data=to_excel_with_format(final_df, highlight_after_col="판매연도"), # 원본merged_df가 아닌 final_df 전달
             file_name=f"sales_data_by_account_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
         )
 
         st.divider()
 
-        if st.button("최종 차량별 매출 현황 저장", type="primary"):
+        # 기준정보 (계정별원장 데이터 이후 표시) — 차량별 매출현황 계산 전에 vendor/hr 준비
+        st.markdown('<div style="font-size:20px; font-weight:bold;">기준정보</div>', unsafe_allow_html=True)
+        col_vendor, col_hr = st.columns(2)
+        with col_vendor:
+            up_vendor = st.file_uploader("거래처 매핑 (.xlsx) ㅣ 거래처, 거래처_정정", type=["xlsx"], key="vendor_up")
+        with col_hr:
+            up_hr = st.file_uploader("인사정보 (.xlsx)", type=["xlsx"], key="hr_up")
+
+        # 업로드 시 master_vendor/master_hr 로 저장하고, 없으면 기존 저장본 사용
+        vendor_df = load_mapping_file(up_vendor, "master_vendor.xlsx", ["거래처", "거래처_정정"], "거래처")
+        hr_df = load_hr_file(up_hr, "master_hr.xlsx")
+
+        with st.expander("현재 적용 중인 기준정보 보기", expanded=False):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.write("**거래처**")
+                if vendor_df is not None:
+                    st.dataframe(vendor_df.rename(columns={'거래처_정정': '매입처 구분'}), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("등록된 거래처 매핑이 없습니다.")
+            with c2:
+                st.write("**인사정보**")
+                if hr_df is not None:
+                    st.dataframe(hr_df, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("등록된 인사정보가 없습니다.")
+
+        st.divider()
+
+        head3_l, head3_r = st.columns([8, 2])
+        with head3_l:
+            st.markdown('<div style="font-size:20px; font-weight:bold;">차량별 매출현황</div>', unsafe_allow_html=True)
+        dl_slot_final = head3_r.empty()  # 제목 우측 엑셀 다운로드 버튼 자리
+
+        if st.button("차량별 매출현황 계산", type="primary"):
             f_df = build_final_report(base_df, merged_df)
-            # 거래처(매입처 구분) + 인사정보(판매연도/판매월 기준 적용시점 매칭) 결합
+            # 거래처(매입처 구분) + 인사정보(판매연도/판매월 = 결산연월 매칭) 결합
             f_df = enrich_vendor_hr(f_df, vendor_df, hr_df)
             st.session_state['current_final'] = f_df
 
@@ -386,25 +417,23 @@ with tab2: # UPLOAD
             # 현황 요약
             counts = f_df['매입유형1'].value_counts()
             st.markdown(f"**전체:** {len(f_df):,}대 │ **상품:** {len(f_df) - counts.get('위탁', 0):,}대 │ **위탁:** {counts.get('위탁', 0):,}대 │ **매출합계:** {f_df['매출합계'].sum():,.0f}원 │ **판매월:** {f_df['판매월'].min()}월 ~ {f_df['판매월'].max()}월")
-            
+
             st.dataframe(f_df, use_container_width=True)
+
+            dl_slot_final.download_button(
+                label="엑셀 다운로드",
+                data=to_excel_with_format(f_df, highlight_after_col="판매연도"),
+                file_name=f"sales_summary(확인용)_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                use_container_width=True
+            )
 
             # 마스터 저장 전 더존 PL 미리보기 (저장 전이라 검증 ✅/❌ 없이 금액만)
             with st.expander("더존 PL 미리보기 (저장 전 · 단위:원)", expanded=True):
                 render_douzone_pl(f_df, key_prefix="upload")
 
-            col1, col2, _ = st.columns([1, 1, 5]) 
-
-            with col1:
-                st.download_button(
-                    label=".xlsx", 
-                    data=to_excel_with_format(f_df, highlight_after_col="판매연도"), 
-                    file_name=f"sales_summary(확인용)_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                    use_container_width=True
-                )
-
-            with col2:
-                if st.button("마스터 파일에 저장", use_container_width=True, type="primary"):
+            col_save, _ = st.columns([2, 8])
+            with col_save:
+                if st.button("VIEW 반영", use_container_width=True, type="primary"):
                     fname, v_err = save_to_master(f_df, verify_file=v_file)
                     if v_err:
                         st.warning(f"⚠️ 저장되었으나 검증은 스킵되었습니다.\n사유: {v_err}")

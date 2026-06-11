@@ -47,7 +47,7 @@ def distribute_indirect_cost(df, merged_df, category_name, col_name, target_mask
 
 def enrich_vendor_hr(df, vendor_df=None, hr_df=None):
     """저장 직전 f_df에 거래처(매입처 구분)·인사정보(매입/판매 본부·실·팀·담당)를 결합한다.
-    인사정보는 결산월의 연·월이 판매연도·판매월과 일치하는 행만 매칭(정확 매칭)."""
+    인사정보는 구분자(판매월1일의 엑셀시리얼_관리용코드)가 디비 '구분자' 컬럼과 일치하는 행을 매칭."""
     df = df.copy()
 
     # === 거래처(매입처 구분) ===
@@ -63,55 +63,63 @@ def enrich_vendor_hr(df, vendor_df=None, hr_df=None):
     df = df.drop(columns=[">>컬럼구분>>"], errors="ignore")
     df[">>컬럼구분>>"] = ""
 
-    # === 인사정보 (결산월의 연·월 == 판매연도·판매월 정확 매칭) ===
-    need_hr = ["결산월", "팀", "본부", "실", "관리명"]
+    # === 인사정보 (구분자 = 판매월1일(엑셀시리얼)_관리용코드 ↔ 디비 '구분자' 컬럼 매칭) ===
+    need_hr = ["구분자", "관리용 코드", "팀명", "본부", "실", "관리명", "매입구분"]
     if hr_df is not None and not hr_df.empty and all(c in hr_df.columns for c in need_hr):
         hr_df = hr_df.copy()
-        hr_df["결산월"] = pd.to_datetime(hr_df["결산월"], errors="coerce")
-        hr_df["_연"] = hr_df["결산월"].dt.year
-        hr_df["_월"] = hr_df["결산월"].dt.month
-        # 팀_정정 → 관리명 사용
-        hr_sel = (hr_df[["_연", "_월", "팀", "본부", "실", "관리명"]]
-                  .dropna(subset=["_연", "_월", "팀"])
-                  .drop_duplicates(["_연", "_월", "팀"]))
 
-        df = df.drop(columns=["매입본부", "매입실", "매입팀", "판매본부2", "판매실", "판매팀"], errors="ignore")
-        df["_연"] = pd.to_numeric(df["판매연도"], errors="coerce")
-        df["_월"] = pd.to_numeric(df["판매월"], errors="coerce")
+        # 팀명 → 관리용 코드 (첫 매칭)
+        team_to_code = (hr_df.dropna(subset=["팀명"])
+                              .drop_duplicates("팀명")
+                              .set_index("팀명")["관리용 코드"])
+        # 디비에 이미 있는 '구분자' 컬럼 → 본부/실/관리명/매입구분
+        hr_df["_gb"] = hr_df["구분자"].astype(str).str.strip()
+        info = hr_df.dropna(subset=["구분자"]).drop_duplicates("_gb").set_index("_gb")
 
-        # 매입지점 매칭 (팀==매입지점 & 결산연월==판매연월)
-        df = df.merge(
-            hr_sel.rename(columns={"팀": "매입지점", "본부": "매입본부", "실": "매입실", "관리명": "매입팀"}),
-            on=["_연", "_월", "매입지점"], how="left"
+        # EOMONTH(판매월1일,-1)+1 = 판매 그 달 1일 → 엑셀 시리얼 (판매월 ↔ 결산월 일치)
+        EXCEL_EPOCH = pd.Timestamp("1899-12-30")
+        smonth = pd.to_datetime(
+            pd.to_numeric(df["판매연도"], errors="coerce").astype("Int64").astype(str)
+            + "-"
+            + pd.to_numeric(df["판매월"], errors="coerce").astype("Int64").astype(str).str.zfill(2)
+            + "-01",
+            errors="coerce"
         )
-        df.loc[df["매입유형1"] == "자산", ["매입팀"]] = "자산"
-        df["매입담당"] = df["매입사원"]
+        serial = (smonth - EXCEL_EPOCH).dt.days.astype("Int64").astype(str)
 
-        cond1 = df["매입실"] == "상품매입실"
-        cond2 = df["매입실"] == "옥션사업실"
-        cond3 = df["매입팀"].str.endswith("지점", na=False)
-        cond4 = df["매입팀"].str.endswith("파트", na=False)
-        df["매입구분"] = np.select(
-            [cond1, cond2, cond3, cond4],
-            ["상품매입실", "기타", "지점", "지점"],
-            default="기타"
-        )
+        def _code(point_col):
+            c = df[point_col].map(team_to_code).astype(str).str.strip()
+            return c.str.replace(r"\.0$", "", regex=True)  # 숫자코드의 .0 제거
 
-        # 판매지점 매칭 (팀==판매지점 & 결산연월==판매연월)
-        df = df.merge(
-            hr_sel.rename(columns={"팀": "판매지점", "본부": "판매본부2", "실": "판매실", "관리명": "판매팀"}),
-            on=["_연", "_월", "판매지점"], how="left"
-        )
+        gb_buy  = serial + "_" + _code("매입지점")   # 매입팀 구분자(미노출)
+        gb_sell = serial + "_" + _code("판매지점")   # 판매팀 구분자(미노출)
 
-        cond1 = df["소/도매"] == "도매"
-        cond2 = df["판매방식"].isin(["기타/지점도매", "도매/도매", "도매/경매"])
+        df = df.drop(columns=["매입본부", "매입실", "매입팀", "매입구분", "판매본부", "판매실", "판매팀"], errors="ignore")
+
+        # 매입 본부/실/팀(관리명) = 디비에서 구분자 일치 행의 값
+        df["매입본부"] = gb_buy.map(info["본부"])
+        df["매입실"]  = gb_buy.map(info["실"])
+        df["매입팀"]  = gb_buy.map(info["관리명"])
+
+        # 매입담당: 매입실 == '자산선환' 이면 매입팀, 아니면 매입사원
+        df["매입담당"] = np.where(df["매입실"] == "자산선환", df["매입팀"], df["매입사원"])
+
+        # 매입구분 = 디비에서 구분자 일치 행의 값 (매입담당 다음 순서)
+        df["매입구분"] = gb_buy.map(info["매입구분"])
+
+        # 판매 본부/실/팀(관리명) = 디비에서 구분자 일치 행의 값
+        df["판매본부"] = gb_sell.map(info["본부"])
+        df["판매실"]  = gb_sell.map(info["실"])
+        df["판매팀"]  = gb_sell.map(info["관리명"])
+
+        # 판매담당: 도매 → 판매팀 / 판매방식(기타·지점도매·도매/도매·도매/경매) → '도매/경매' / 그 외 → 판매사원
+        cond_dome = df["소/도매"] == "도매"
+        cond_way = df["판매방식"].isin(["기타/지점도매", "도매/도매", "도매/경매"])
         df["판매담당"] = np.select(
-            [cond1, cond2],
-            [df["판매팀"], "#지점도매"],
+            [cond_dome, cond_way],
+            [df["판매팀"], "도매/경매"],
             default=df["판매사원"]
         )
-
-        df = df.drop(columns=["_연", "_월"], errors="ignore")
 
     # 구분자 컬럼을 '판매연도' 바로 왼쪽으로 이동 ('판매연도'가 없으면 현재 위치 유지)
     if ">>컬럼구분>>" in df.columns and "판매연도" in df.columns:

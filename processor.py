@@ -83,24 +83,26 @@ def preprocess_sales_data(uploaded_files, base_df):
     merged_df["차량번호"] = merged_df["적요"].str.extract(f"({unit_pattern})")
 
     # 3️⃣ 상품ID Lookup
-    new_map = base_df.dropna(subset=["현차량번호"]).drop_duplicates("현차량번호").set_index("현차량번호")["상품ID"].to_dict()
-    old_map = base_df.dropna(subset=["전차량번호"]).drop_duplicates("전차량번호").set_index("전차량번호")["상품ID"].to_dict()
+    #  ① 적요에서 C+11자리 추출 → 손익DB(base) 상품ID에 존재하면 그 값 사용
+    #  ② 차량번호 → 손익DB 현차량번호 → 상품ID
+    #  ③ 차량번호 → 손익DB 전차량번호 → 상품ID
+    #  ④ 그래도 없으면 "확인필요"
+    new_map = base_df.dropna(subset=["현차량번호"]).drop_duplicates("현차량번호").set_index("현차량번호")["상품ID"]
+    old_map = base_df.dropna(subset=["전차량번호"]).drop_duplicates("전차량번호").set_index("전차량번호")["상품ID"]
+    valid_ids = set(base_df["상품ID"].dropna().astype(str))
 
-    merged_df["상품ID"] = "확인필요"
+    code_from_memo = merged_df["적요"].str.extract(r"(C\d{11})", expand=False)  # ①
+    sid = code_from_memo.where(code_from_memo.isin(valid_ids))                  # 유효한 상품ID만
+    sid = sid.fillna(merged_df["차량번호"].map(new_map))                          # ②
+    sid = sid.fillna(merged_df["차량번호"].map(old_map))                          # ③
+    merged_df["상품ID"] = sid.fillna("확인필요")                                  # ④
+
+    # 특수 케이스 override (기존 유지)
     mask_blank = ((merged_df["계정명"] == "수입수수료(연회비)") | (merged_df["거래처"] == "결산거래처") | (merged_df["계정명"] == "수입수수료(상품화)"))
     merged_df.loc[mask_blank, "상품ID"] = ""
-    
+
     mask_check = merged_df["분류"].isin(["낙찰수수료_취소수수료", "낙찰수수료_자산", "낙찰수수료_외부출품"])
     merged_df.loc[mask_check, "상품ID"] = "확인필요"
-
-    # 지게차/일반 차량 매핑
-    mask_forklift = merged_df["계정명"] == "상품매출(자동차)"
-    merged_df.loc[mask_forklift, "상품ID"] = merged_df.loc[mask_forklift, "적요"].str[:12]
-
-    lookup_map = {**old_map, **new_map}
-    mask_lookup = ~mask_blank & ~mask_check & ~mask_forklift
-    merged_df.loc[mask_lookup, "상품ID"] = merged_df.loc[mask_lookup, "차량번호"].map(lookup_map)
-    merged_df["상품ID"] = merged_df["상품ID"].fillna("확인필요")
 
     # 1. 취소 로직 (금액이 반대인 전표 찾기)
     merged_df['대변'] = pd.to_numeric(merged_df['대변'], errors='coerce').fillna(0)

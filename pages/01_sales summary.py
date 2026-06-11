@@ -366,7 +366,7 @@ with tab2: # UPLOAD
 
         dl_slot_account.download_button(
             label="엑셀 다운로드",
-            data=to_excel_with_format(final_df, highlight_after_col="판매연도"), # 원본merged_df가 아닌 final_df 전달
+            data=to_excel_with_format(final_df, highlight_after_col="회계연도"), # 원본merged_df가 아닌 final_df 전달
             file_name=f"sales_data_by_account_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True

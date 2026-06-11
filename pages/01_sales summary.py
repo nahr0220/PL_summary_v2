@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from utils.excel import to_excel_with_format
 from processor import preprocess_sales_data
-from analyzer import build_final_report, save_to_master, enrich_vendor_hr
+from analyzer import build_final_report, save_to_master, enrich_vendor_hr, compute_verification
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
@@ -141,7 +141,7 @@ def render_douzone_pl(source_df, key_prefix="pl"):
                 detail_rows.append({
                     "항목": item, "월": m,
                     "PL계산": calc, "검증파일": actual, "차액": diff,
-                    "일치": "✅" if abs(diff) < 100 else "❌",
+                    "일치": "✅" if round(diff) == 0 else "❌",
                 })
 
     if detail_rows:
@@ -150,7 +150,7 @@ def render_douzone_pl(source_df, key_prefix="pl"):
         only_diff = st.checkbox("차액 있는 항목만 보기", value=True, key=f"{key_prefix}_diff_only")
         view_df = detail_df[detail_df["일치"] == "❌"] if only_diff else detail_df
         if view_df.empty:
-            st.caption("차액이 100원 이상인 항목이 없습니다. (모두 일치)")
+            st.caption("차액이 있는 항목이 없습니다. (전부 정확히 일치)")
         else:
             st.dataframe(
                 view_df.style
@@ -266,12 +266,10 @@ with tab1:  # VIEW (매출요약정보)
 
             st.dataframe(style_dataframe(r_p), use_container_width=True)
 
-        st.markdown("""
-            <div style="display:flex; justify-content:space-between; align-items:flex-end;">
-                <div style="font-size:20px; font-weight:bold;">차량별 매출현황</div>
-                <div style="font-size:12px; color:gray;">(단위: 원)</div>
-            </div>
-            """, unsafe_allow_html=True)
+        head_v_l, head_v_r = st.columns([8, 2])
+        with head_v_l:
+            st.markdown('<div style="font-size:20px; font-weight:bold;">차량별 매출현황</div>', unsafe_allow_html=True)
+        dl_slot_view = head_v_r.empty()  # 제목 우측 엑셀 다운로드 버튼 자리
 
         col1, col2 = st.columns(2)
         with col1: s_yrs = st.multiselect("판매연도", sorted(master_df['판매연도'].unique()), default=sorted(master_df['판매연도'].unique()))
@@ -305,7 +303,12 @@ with tab1:  # VIEW (매출요약정보)
         counts = d_df['매입유형1'].value_counts()
         st.markdown(f"**대수:** {len(d_df):,}대 │ **상품매출:** {d_df['상품매출'].sum():,.0f}원 │ **용역매출:** {d_df['용역매출'].sum():,.0f}원 │ **판매월:** {d_df['판매월'].min()}월 ~ {d_df['판매월'].max()}월")
         st.dataframe(d_df[display_cols], use_container_width=True)
-        st.download_button(".xlsx", to_excel_with_format(d_df[display_cols], highlight_after_col="판매연도"), f"sales_summary_{datetime.now().strftime('%Y%m%d')}.xlsx")
+        dl_slot_view.download_button(
+            "엑셀 다운로드",
+            to_excel_with_format(d_df[display_cols], highlight_after_col=">>컬럼구분>>"),
+            f"sales_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            use_container_width=True
+        )
 
         # 하단에 더존 PL 표시
         st.divider()
@@ -340,7 +343,7 @@ with tab2: # UPLOAD
     dl_slot_account = head2_r.empty()  # 제목 우측 엑셀 다운로드 버튼 자리
     col_u, col_v = st.columns(2)
     with col_u: u_files = st.file_uploader("업로드 파일 ㅣ 총 12개 파일 ㅣ 상품매출(자동차), 수입수수료(반납취소, 정보제공, 상품화, 잔가옵션 제외)", type=["xlsx"], accept_multiple_files=True)
-    with col_v: v_file = st.file_uploader("업로드 파일 ㅣ 기간별손익계산서 (검증용)", type=["xls", "xlsx"])
+    with col_v: v_file = st.file_uploader("업로드 파일 ㅣ 기간별손익계산서", type=["xls", "xlsx"])
 
     if u_files and base_file:
         merged_df = preprocess_sales_data(u_files, base_df)
@@ -375,9 +378,9 @@ with tab2: # UPLOAD
         st.markdown('<div style="font-size:20px; font-weight:bold;">기준정보</div>', unsafe_allow_html=True)
         col_vendor, col_hr = st.columns(2)
         with col_vendor:
-            up_vendor = st.file_uploader("거래처 매핑 (.xlsx) ㅣ 거래처, 거래처_정정", type=["xlsx"], key="vendor_up")
+            up_vendor = st.file_uploader("거래처", type=["xlsx"], key="vendor_up")
         with col_hr:
-            up_hr = st.file_uploader("인사정보 (.xlsx)", type=["xlsx"], key="hr_up")
+            up_hr = st.file_uploader("인사정보", type=["xlsx"], key="hr_up")
 
         # 업로드 시 master_vendor/master_hr 로 저장하고, 없으면 기존 저장본 사용
         vendor_df = load_mapping_file(up_vendor, "master_vendor.xlsx", ["거래처", "거래처_정정"], "거래처")
@@ -422,14 +425,21 @@ with tab2: # UPLOAD
 
             dl_slot_final.download_button(
                 label="엑셀 다운로드",
-                data=to_excel_with_format(f_df, highlight_after_col="판매연도"),
+                data=to_excel_with_format(f_df, highlight_after_col=">>컬럼구분>>"),
                 file_name=f"sales_summary(확인용)_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 use_container_width=True
             )
 
-            # 마스터 저장 전 더존 PL 미리보기 (저장 전이라 검증 ✅/❌ 없이 금액만)
+            # 마스터 저장 전 더존 PL 미리보기 (검증파일 올리면 VIEW와 동일하게 ✅/❌·차액까지)
             with st.expander("더존 PL 미리보기 (저장 전 · 단위:원)", expanded=True):
-                render_douzone_pl(f_df, key_prefix="upload")
+                if v_file is not None:
+                    preview_df, v_err = compute_verification(f_df, v_file)
+                    if v_err:
+                        st.caption(f"⚠️ 검증 파일 처리 문제: {v_err}")
+                    render_douzone_pl(preview_df, key_prefix="upload")
+                else:
+                    st.caption("검증용 파일(기간별손익계산서)을 올리면 ✅/❌·차액까지 표시됩니다.")
+                    render_douzone_pl(f_df, key_prefix="upload")
 
             col_save, _ = st.columns([2, 8])
             with col_save:

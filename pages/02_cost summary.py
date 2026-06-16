@@ -1765,7 +1765,11 @@ with tab1:
                         writer.sheets["최종원가마스터"], df,
                     )
 
-                # 숫자 셀에 천 단위 콤마 적용 (단, 컬럼명에 '연도'/'년도' 포함 시 제외)
+                # 숫자/날짜 셀 포맷 적용
+                #  - 컬럼명에 '연도'/'년도' 포함: 포맷 적용 안 함 (천 단위 콤마도 X)
+                #  - 숫자: #,##0
+                #  - 날짜/datetime: 시간이 모두 00:00:00 이면 yyyy-mm-dd, 아니면 yyyy-mm-dd hh:mm:ss
+                import datetime as _dt
                 _YEAR_KEYWORDS = ("연도", "년도")
                 wb = writer.book
                 for ws in wb.worksheets:
@@ -1778,18 +1782,37 @@ with tab1:
                             continue
                         if any(kw in str(col_name) for kw in _YEAR_KEYWORDS):
                             continue
+
+                        # 1차 스캔: 컬럼이 datetime 타입인지, 시간이 모두 00:00:00 인지 판단
+                        is_date_col = False
+                        all_midnight = True
+                        for row in range(2, ws.max_row + 1):
+                            val = ws.cell(row=row, column=col_idx).value
+                            if isinstance(val, _dt.datetime):
+                                is_date_col = True
+                                if (val.hour, val.minute, val.second, val.microsecond) != (0, 0, 0, 0):
+                                    all_midnight = False
+                            elif isinstance(val, _dt.date):
+                                is_date_col = True
+
+                        date_fmt = "yyyy-mm-dd" if all_midnight else "yyyy-mm-dd hh:mm:ss"
+
                         for row in range(2, ws.max_row + 1):
                             cell = ws.cell(row=row, column=col_idx)
                             val = cell.value
                             if isinstance(val, bool):
                                 continue
-                            if isinstance(val, (int, float)):
+                            if isinstance(val, _dt.datetime):
+                                cell.number_format = date_fmt
+                            elif isinstance(val, _dt.date):
+                                cell.number_format = "yyyy-mm-dd"
+                            elif isinstance(val, (int, float)) and not is_date_col:
                                 cell.number_format = "#,##0"
             return buf.getvalue()
 
         with col_dl:
             st.download_button(
-                "다운로드",
+                "엑셀 다운로드",
                 data=_build_monthly_split_excel_bytes(master_df),
                 file_name=f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

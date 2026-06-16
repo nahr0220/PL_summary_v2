@@ -1718,9 +1718,9 @@ with tab1:
 
     st.divider()
 
-    # 차량별 원가 (제목 옆 오른쪽 끝에 다운로드 버튼)
+    # 차량별 원가 (제목 옆 오른쪽에 다운로드 버튼)
     # 회계연도/회계월별로: 화면은 탭 분리, 엑셀 다운로드는 시트 분리
-    col_title, col_dl = st.columns([5, 1])
+    col_title, col_dl = st.columns([8, 1], vertical_alignment="bottom")
     with col_title:
         st.subheader("차량별 원가")
 
@@ -1738,8 +1738,11 @@ with tab1:
             ym_pairs = []
 
         # 다운로드 엑셀: 회계월마다 시트 분리 (없으면 단일 시트)
+        # + 컬럼 그룹별 배경색 + 헤더 볼드/큰글씨 + 천 단위 콤마
         def _build_monthly_split_excel_bytes(df):
             from io import BytesIO
+            from cost_summary_preprocess import _apply_excel_column_group_styles
+
             buf = BytesIO()
             with pd.ExcelWriter(buf, engine="openpyxl") as writer:
                 if ym_pairs:
@@ -1752,8 +1755,15 @@ with tab1:
                             continue
                         sheet_name = f"{y}-{m:02d}"
                         sub.to_excel(writer, index=False, sheet_name=sheet_name)
+                        # 시트별 컬럼 그룹 색칠 + 헤더 스타일
+                        _apply_excel_column_group_styles(
+                            writer.sheets[sheet_name], sub,
+                        )
                 else:
                     df.to_excel(writer, index=False, sheet_name="최종원가마스터")
+                    _apply_excel_column_group_styles(
+                        writer.sheets["최종원가마스터"], df,
+                    )
 
                 # 숫자 셀에 천 단위 콤마 적용 (단, 컬럼명에 '연도'/'년도' 포함 시 제외)
                 _YEAR_KEYWORDS = ("연도", "년도")
@@ -1784,6 +1794,7 @@ with tab1:
                 file_name=f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="master_download_top",
+                use_container_width=True,
             )
 
     if master_df is None:

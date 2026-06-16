@@ -304,10 +304,25 @@ def render_base_upload(settlement_year, settlement_month):
         else:
             st.info("상품ID를 가진 업로드 데이터가 아직 없습니다.")
 
-    visible_dfs = {
+    # 원하는 탭 순서 (없는 키는 자동 건너뜀, 그 외 키는 뒤에 자연 순서로 붙음)
+    _BASE_TAB_ORDER = [
+        "기초재고", "매입조회", "전체상품조회", "검사매출", "정비매출",
+        "위탁수불부", "위탁수불부_기초", "위탁수불부_입고",
+    ]
+    # "전체상품조회" 는 화면 라벨만 "선매입" 으로 표시 (내부 키는 그대로)
+    _BASE_TAB_LABEL_OVERRIDE = {"전체상품조회": "선매입"}
+
+    visible_dfs_raw = {
         key: value
         for key, value in dfs.items()
         if key not in HIDDEN_BASE_DF_KEYS and value is not None
+    }
+    # 지정 순서 → 그 외 잔여 키 순서
+    ordered_keys = [k for k in _BASE_TAB_ORDER if k in visible_dfs_raw]
+    ordered_keys += [k for k in visible_dfs_raw if k not in ordered_keys]
+    visible_dfs = {
+        _BASE_TAB_LABEL_OVERRIDE.get(k, k): visible_dfs_raw[k]
+        for k in ordered_keys
     }
     if visible_dfs:
         with st.expander("파일별 개별 데이터 확인"):
@@ -465,6 +480,21 @@ def render_manufacturing_cost_upload(product_id_df, settlement_year, settlement_
                 ] = df
         except Exception as exc:
             st.error(f"{file.name} 처리 중 오류: {exc}")
+
+    # 원하는 탭 순서: 재료비 → 노무비 → 부문별경비 → 직접경비
+    # (없는 키는 건너뜀, 그 외 키는 뒤에 자연 순서로)
+    _MFG_TAB_ORDER_PREFIXES = ["재료비", "노무비", "부문별경비", "직접경비"]
+
+    def _mfg_order_key(label):
+        for i, prefix in enumerate(_MFG_TAB_ORDER_PREFIXES):
+            if str(label).startswith(prefix):
+                return i
+        return len(_MFG_TAB_ORDER_PREFIXES)  # 매칭 안 된 건 맨 뒤
+
+    manufacturing_cost_sheet_dfs = {
+        k: manufacturing_cost_sheet_dfs[k]
+        for k in sorted(manufacturing_cost_sheet_dfs.keys(), key=_mfg_order_key)
+    }
 
     render_sheet_workbook(
         manufacturing_cost_sheet_dfs,

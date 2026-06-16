@@ -450,8 +450,8 @@ def preprocess_sales(file):
     """검사매출 / 정비매출"""
     df = _ensure_product_id(_strip_columns(pd.read_excel(file)))
 
-    if "거래처" in df.columns:
-        df = df[~df["거래처"].astype(str).str.strip().eq("현대자동차(주)")].copy()
+    if "세부내역" in df.columns:
+        df = df[~df["세부내역"].astype(str).str.contains("보증수리", na=False)].copy()
     if "상품ID" in df.columns:
         df = df.drop_duplicates(subset=["상품ID"]).copy()
     return df

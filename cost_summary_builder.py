@@ -1452,12 +1452,17 @@ _MASTER_TO_INVENTORY_COLUMN_MAP = {
 
 
 def _find_latest_cost_summary_path():
-    """코드 폴더 / 상위 / 현재에서 가장 최근 cost_summary_*.xlsx 경로 반환 (없으면 None)."""
+    """가장 최근 cost_summary_*.xlsx 경로 반환 (없으면 None).
+
+    빌더 파일 위치를 기준으로 부모 폴더(앱 루트) 를 먼저 검색,
+    그 다음 같은 폴더, 현재 작업 디렉토리 순으로 fallback.
+    """
     import os
     import glob
 
     here = os.path.dirname(os.path.abspath(__file__))
-    search_dirs = [here, os.path.join(here, ".."), "."]
+    parent = os.path.dirname(here)  # 부모 폴더 (코드가 pages 안에 있으면 앱 루트)
+    search_dirs = [parent, here, "."]
     matched = []
     for d in search_dirs:
         try:

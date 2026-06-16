@@ -1253,11 +1253,24 @@ st.title("Cost Summary")
 import os as _os
 import glob as _glob
 
+
+def _master_dir():
+    """마스터 파일 저장 폴더 반환.
+
+    코드가 'pages/' 안에 있으면 그 부모 폴더(앱 루트)를 사용.
+    그 외에는 코드 같은 폴더를 사용.
+    """
+    here = _os.path.dirname(_os.path.abspath(__file__))
+    if _os.path.basename(here).lower() == "pages":
+        return _os.path.dirname(here)
+    return here
+
+
 MASTER_FILE_PATH = _os.path.join(
-    _os.path.dirname(_os.path.abspath(__file__)), f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    _master_dir(), f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx"
 )
 MASTER_META_PATH = _os.path.join(
-    _os.path.dirname(_os.path.abspath(__file__)), "final_cost_master_meta.txt"
+    _master_dir(), "final_cost_master_meta.txt"
 )
 
 # 누적 키: 이 조합이 같은 행은 새 데이터로 교체, 다른 행은 추가
@@ -1265,8 +1278,8 @@ _MASTER_ACCUMULATION_KEYS = ["상품ID", "매출구분", "회계연도", "회계
 
 
 def _find_latest_cost_summary_path():
-    """코드 폴더에서 가장 최근 cost_summary_*.xlsx 경로 반환 (없으면 None)."""
-    here = _os.path.dirname(_os.path.abspath(__file__))
+    """마스터 폴더에서 가장 최근 cost_summary_*.xlsx 경로 반환 (없으면 None)."""
+    here = _master_dir()
     matched = [
         p for p in _glob.glob(_os.path.join(here, "cost_summary_*.xlsx"))
         if _os.path.exists(p) and _os.path.getsize(p) > 0
@@ -1350,7 +1363,7 @@ def save_final_master(final_cost_df):
     merged, replaced = _accumulate_master_data(existing, final_cost_df)
 
     today_path = _os.path.join(
-        _os.path.dirname(_os.path.abspath(__file__)),
+        _master_dir(),
         f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
     )
     with pd.ExcelWriter(today_path, engine="openpyxl") as writer:
@@ -1395,7 +1408,7 @@ def load_final_master():
 def delete_final_master():
     """모든 cost_summary_*.xlsx 파일과 메타 삭제. 삭제 성공 여부 반환."""
     deleted = False
-    here = _os.path.dirname(_os.path.abspath(__file__))
+    here = _master_dir()
     for path in _glob.glob(_os.path.join(here, "cost_summary_*.xlsx")):
         try:
             _os.remove(path)

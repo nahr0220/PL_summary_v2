@@ -57,7 +57,8 @@ def load_final_cost_master():
     import glob
 
     here = os.path.dirname(os.path.abspath(__file__))
-    search_dirs = [here, os.path.join(here, ".."), "."]
+    parent = os.path.dirname(here)  # 부모 폴더 (코드가 pages 안에 있으면 앱 루트)
+    search_dirs = [parent, here, "."]
 
     matched = []
     for d in search_dirs:

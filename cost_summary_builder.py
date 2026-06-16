@@ -442,6 +442,10 @@ def _aggregate_material_cost_by_product_id(manufacturing_cost_sheet_dfs):
         temp = df[["상품ID", "매출구분", amount_column]].copy()
         temp["매출구분"] = temp["매출구분"].astype(str).str.strip()
         temp = temp[~temp["매출구분"].eq("검사매출")]
+        # 원가구분 == '재료비' 만 직접에 포함 (페인트는 별도 컬럼으로 분리)
+        if "원가구분" in df.columns:
+            cost_type = df["원가구분"].astype(str).str.strip()
+            temp = temp[cost_type.loc[temp.index].eq("재료비")]
         temp = temp.rename(columns={amount_column: "재료비_직접"})
         frames.append(temp)
 
@@ -461,6 +465,77 @@ def _aggregate_material_cost_by_product_id(manufacturing_cost_sheet_dfs):
     return combined.groupby(
         ["상품ID", "매출구분"], as_index=False
     )["재료비_직접"].sum()
+
+
+def _aggregate_paint_amount(manufacturing_cost_sheet_dfs):
+    """재료비 시트에서 원가구분 == '페인트' 인 행의 금액 합 반환."""
+    if not manufacturing_cost_sheet_dfs:
+        return 0.0
+
+    total = 0.0
+    for sheet_name, df in manufacturing_cost_sheet_dfs.items():
+        if not str(sheet_name).startswith(MATERIAL_COST_SHEET_PREFIX):
+            continue
+        if df is None or df.empty or "원가구분" not in df.columns:
+            continue
+
+        amount_column = next(
+            (c for c in MATERIAL_COST_AMOUNT_COLUMNS if c in df.columns), None
+        )
+        if amount_column is None:
+            continue
+
+        cost_type = df["원가구분"].astype(str).str.strip()
+        paint_rows = df[cost_type.eq("페인트")]
+        if paint_rows.empty:
+            continue
+
+        amounts = pd.to_numeric(paint_rows[amount_column], errors="coerce").fillna(0)
+        total += float(amounts.sum())
+
+    return total
+
+
+def _append_material_paint_column(final_df, manufacturing_cost_sheet_dfs):
+    """재료비_페인트 컬럼 추가 (도장 시간 비례 배부, 정수 단가 × 도장시간).
+
+    분자: 재료비 시트에서 원가구분=='페인트' 행 금액 합
+    분모: 공정별_도장 (=유효실측시간_도장) 행 전체 합
+    단가 = round(분자 / 분모) — 정수
+    각 행 = 단가 × 그 행의 공정별_도장
+
+    호출 시점: 공정별 컬럼이 이미 만들어진 후여야 한다.
+    """
+    final_df["재료비_페인트"] = 0
+
+    paint_total = _aggregate_paint_amount(manufacturing_cost_sheet_dfs)
+    if paint_total == 0:
+        return final_df
+
+    if "공정별_도장" not in final_df.columns:
+        return final_df
+
+    weight_sum = float(
+        pd.to_numeric(final_df["공정별_도장"], errors="coerce").fillna(0).sum()
+    )
+    if weight_sum == 0:
+        return final_df
+
+    # 방식 B: 정수 단가 × 행 가중치 (제조경비 배부와 동일)
+    _allocate_amount_by_rounded_unit_rate(
+        final_df,
+        "재료비_페인트",
+        paint_total,
+        final_df["공정별_도장"],
+    )
+
+    # 재료비_합 = 직접 + 배부 + 페인트
+    if "재료비_합" in final_df.columns:
+        final_df["재료비_합"] = (
+            pd.to_numeric(final_df["재료비_합"], errors="coerce").fillna(0)
+            + pd.to_numeric(final_df["재료비_페인트"], errors="coerce").fillna(0)
+        )
+    return final_df
 
 
 def _append_material_cost_columns(
@@ -1967,6 +2042,8 @@ def _reorder_final_columns(
         final_df, cost_driver_dfs, settlement_year, settlement_month,
     )
     final_df = _append_process_category_columns(final_df, combined_cost_driver_df)
+    # 재료비_페인트: 공정별_도장 이 만들어진 후 호출 (도장 시간 비례)
+    final_df = _append_material_paint_column(final_df, manufacturing_cost_sheet_dfs)
     # 노무비는 공정별 컬럼이 채워진 후에 계산해야 함 (분모로 공정별_*_합 사용)
     final_df = _append_labor_cost_columns(final_df, manufacturing_cost_sheet_dfs)
     manufacturing_expense_diagnostics = []
@@ -2059,7 +2136,7 @@ def _reorder_final_columns(
     tail_columns.extend([PROCESS_CATEGORY_TOTAL_COLUMN])
     tail_columns.extend(PROCESS_CATEGORY_COLUMNS.keys())
     # 당월_재료비(재료비_합/직접/배부)는 유효실측시간_도장(공정별_도장) 뒤에 위치
-    tail_columns.extend(["재료비_합", "재료비_직접", "재료비_배부"])
+    tail_columns.extend(["재료비_합", "재료비_직접", "재료비_페인트", "재료비_배부"])
     tail_columns.extend([LABOR_COST_TOTAL_COLUMN])
     tail_columns.extend([name for name, _, _ in LABOR_COST_SPECS])
     tail_columns.extend([LABOR_COST_GIFT_COLUMN])
@@ -2212,6 +2289,7 @@ def _build_output_column_rename_map():
     # 재료비
     rename_map["재료비_합"] = "당월_재료비_합계"
     rename_map["재료비_직접"] = "당월_재료비_직접"
+    rename_map["재료비_페인트"] = "당월_재료비_페인트"
     rename_map["재료비_배부"] = "당월_재료비_배부"
 
     # 원가동인

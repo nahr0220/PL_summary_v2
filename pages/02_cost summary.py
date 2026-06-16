@@ -1718,21 +1718,95 @@ with tab1:
 
     st.divider()
 
-    # 차량별 원가
-    st.subheader("차량별 원가")
+    # 차량별 원가 (제목 옆 오른쪽 끝에 다운로드 버튼)
+    # 회계연도/회계월별로: 화면은 탭 분리, 엑셀 다운로드는 시트 분리
+    col_title, col_dl = st.columns([5, 1])
+    with col_title:
+        st.subheader("차량별 원가")
+
+    if master_df is not None:
+        has_period = "회계연도" in master_df.columns and "회계월" in master_df.columns
+        if has_period:
+            ym_pairs = sorted({
+                (int(y), int(m))
+                for y, m in zip(
+                    pd.to_numeric(master_df["회계연도"], errors="coerce").dropna(),
+                    pd.to_numeric(master_df["회계월"], errors="coerce").dropna(),
+                )
+            })
+        else:
+            ym_pairs = []
+
+        # 다운로드 엑셀: 회계월마다 시트 분리 (없으면 단일 시트)
+        def _build_monthly_split_excel_bytes(df):
+            from io import BytesIO
+            buf = BytesIO()
+            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                if ym_pairs:
+                    yr_series = pd.to_numeric(df["회계연도"], errors="coerce")
+                    mo_series = pd.to_numeric(df["회계월"], errors="coerce")
+                    for y, m in ym_pairs:
+                        mask = yr_series.eq(y) & mo_series.eq(m)
+                        sub = df[mask]
+                        if sub.empty:
+                            continue
+                        sheet_name = f"{y}-{m:02d}"
+                        sub.to_excel(writer, index=False, sheet_name=sheet_name)
+                else:
+                    df.to_excel(writer, index=False, sheet_name="최종원가마스터")
+
+                # 숫자 셀에 천 단위 콤마 적용 (단, 컬럼명에 '연도'/'년도' 포함 시 제외)
+                _YEAR_KEYWORDS = ("연도", "년도")
+                wb = writer.book
+                for ws in wb.worksheets:
+                    headers = [
+                        ws.cell(row=1, column=c).value
+                        for c in range(1, ws.max_column + 1)
+                    ]
+                    for col_idx, col_name in enumerate(headers, start=1):
+                        if col_name is None:
+                            continue
+                        if any(kw in str(col_name) for kw in _YEAR_KEYWORDS):
+                            continue
+                        for row in range(2, ws.max_row + 1):
+                            cell = ws.cell(row=row, column=col_idx)
+                            val = cell.value
+                            if isinstance(val, bool):
+                                continue
+                            if isinstance(val, (int, float)):
+                                cell.number_format = "#,##0"
+            return buf.getvalue()
+
+        with col_dl:
+            st.download_button(
+                "다운로드",
+                data=_build_monthly_split_excel_bytes(master_df),
+                file_name=f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="master_download_top",
+            )
+
     if master_df is None:
         st.info("저장된 최종 원가 마스터가 없습니다. UPLOAD 탭에서 생성 후 '최종 마스터 저장'을 눌러주세요.")
     else:
         if master_saved_at:
             st.caption(f"마지막 저장: {master_saved_at}")
         st.write(f"건수: {len(master_df):,}건")
-        st.download_button(
-            "최종 원가 마스터 다운로드",
-            data=dataframe_to_excel_bytes(master_df, sheet_name="최종원가마스터"),
-            file_name=f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-        st.dataframe(dataframe_for_display(master_df), use_container_width=True)
+
+        # 화면: 회계월별 탭 분리 (오름차순)
+        if ym_pairs:
+            tab_labels = [f"{y}-{m:02d}" for y, m in ym_pairs]
+            monthly_tabs = st.tabs(tab_labels)
+            yr_series = pd.to_numeric(master_df["회계연도"], errors="coerce")
+            mo_series = pd.to_numeric(master_df["회계월"], errors="coerce")
+            for (y, m), tab_obj in zip(ym_pairs, monthly_tabs):
+                with tab_obj:
+                    mask = yr_series.eq(y) & mo_series.eq(m)
+                    sub = master_df[mask]
+                    st.caption(f"{y}-{m:02d} · {len(sub):,}건")
+                    st.dataframe(dataframe_for_display(sub), use_container_width=True)
+        else:
+            st.dataframe(dataframe_for_display(master_df), use_container_width=True)
 
         # 데이터 초기화 (저장본 삭제)
         with st.expander("⚠️ 데이터 초기화"):

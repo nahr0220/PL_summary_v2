@@ -1511,14 +1511,14 @@ def _load_master_pnl_product_id_counts(settlement_year=None, settlement_month=No
 
 # 마스터의 누적합계 컬럼 → 기초재고 시트의 _전월 컬럼 매핑
 _MASTER_TO_INVENTORY_COLUMN_MAP = {
-    "상품매입액_누적합계": "상품매입액_전월",
-    "취득세_누적합계": "취득세_전월",
-    "매입수수료_누적합계": "매입수수료_전월",
-    "폐자원공제_누적합계": "폐자원공제_전월",
-    "초과운행_누적합계": "초과운행_전월",
-    "차액배부_누적합계": "차액배부_전월",
-    "페이백(반납)_누적합계": "페이백(반납)_전월",
-    "페이백(미반납)_누적합계": "페이백(미반납)_전월",
+    "상품매입액_합계": "상품매입액_전월",
+    "취득세_합계": "취득세_전월",
+    "매입수수료_합계": "매입수수료_전월",
+    "폐자원공제_합계": "폐자원공제_전월",
+    "초과운행_합계": "초과운행_전월",
+    "차액배부_합계": "차액배부_전월",
+    "페이백(반납)_합계": "페이백(반납)_전월",
+    "페이백(미반납)_합계": "페이백(미반납)_전월",
     "재료비_누적합계": "재료비_전월",
     "노무비_누적합계": "노무비_전월",
     "제조경비_누적합계": "제조경비_전월",
@@ -1604,6 +1604,22 @@ def _build_inventory_df_from_master(settlement_year, settlement_month):
             prev_rows["기말_수량"], errors="coerce"
         ).fillna(0)
         prev_rows = prev_rows[prev_rows["기말_수량"].eq(1)]
+    if prev_rows.empty:
+        return None
+
+    # 매출구분 == "사내매출" 만 추출
+    if "매출구분" in prev_rows.columns:
+        sales_type = prev_rows["매출구분"].astype(str).str.strip()
+        prev_rows = prev_rows[sales_type.eq("사내매출")]
+    if prev_rows.empty:
+        return None
+
+    # 선매입여부 != "선매입" 만 추출
+    # (선매입 상품은 다음 달 매입조회에 또 잡혀서 매입조회 필터에서 처리되므로
+    #  여기서 가져오면 중복됨)
+    if "선매입여부" in prev_rows.columns:
+        presale = prev_rows["선매입여부"].astype(str).str.strip()
+        prev_rows = prev_rows[~presale.eq("선매입")]
     if prev_rows.empty:
         return None
 

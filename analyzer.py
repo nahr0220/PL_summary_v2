@@ -117,7 +117,7 @@ def enrich_vendor_hr(df, vendor_df=None, hr_df=None):
         cond_way = df["판매방식"].isin(["기타/지점도매", "도매/도매", "도매/경매"])
         df["판매담당"] = np.select(
             [cond_dome, cond_way],
-            [df["판매팀"], "도매/경매"],
+            [df["판매팀"], "#지점도매"],
             default=df["판매사원"]
         )
 

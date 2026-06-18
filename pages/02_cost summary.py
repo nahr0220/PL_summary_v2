@@ -510,13 +510,14 @@ def render_manufacturing_cost_upload(product_id_df, settlement_year, settlement_
 # ============================================================
 
 # 키워드 매칭 우선순위 (긴/명확한 것부터 — 짧은 'sm'이 다른 이름에 잘못 매칭되지 않도록)
-COST_DRIVER_KEYWORDS = ["AQI실적", "RTLS", "rtc", "TS", "sm"]
+COST_DRIVER_KEYWORDS = ["AQI실적", "RTLS", "rtcsm", "rtc", "TS", "sm"]
 
 # 키워드별 시트 선택 규칙
 #   "settlement": 시트명이 결산연도-월에 매칭되는 시트만 사용 (예: '2026-01')
 #   "all":        모든 시트 사용
 #   prefix 문자열: 시트명이 해당 prefix 로 시작하는 시트만 사용
 COST_DRIVER_SHEET_RULE = {
+    "rtcsm": "settlement",
     "rtc": "settlement",
     "sm": "settlement",
     "RTLS": "품질개선_RTLS",
@@ -578,7 +579,7 @@ def render_cost_driver_upload(settlement_year=None, settlement_month=None):
     st.markdown("##### 3-1 원가동인")
 
     uploaded_files = st.file_uploader(
-        "원가동인 업로드 (AQI실적/TS/RTLS/RTC/SM)",
+        "원가동인 업로드 (AQI실적/TS/RTLS/RTCSM 또는 RTC·SM 각각)",
         type=["xlsx", "xls"], accept_multiple_files=True, key="cost_driver_files",
     )
 
@@ -594,7 +595,7 @@ def render_cost_driver_upload(settlement_year=None, settlement_month=None):
         matched_keyword = _match_cost_driver_keyword(file.name)
         if matched_keyword is None:
             st.warning(
-                f"{file.name}: AQI실적, TS, RTLS, RTC, SM 중 하나가 파일명에 포함되어야 합니다."
+                f"{file.name}: AQI실적, TS, RTLS, RTCSM, RTC, SM 중 하나가 파일명에 포함되어야 합니다."
             )
             continue
 
@@ -635,11 +636,39 @@ def render_cost_driver_upload(settlement_year=None, settlement_month=None):
             cleaned_sheets[sheet_name] = df
 
         if cleaned_sheets:
-            cost_driver_dfs[matched_keyword] = cleaned_sheets
-            st.success(
-                f"✅ {file.name} → [{matched_keyword}] "
-                f"선택된 시트: {list(cleaned_sheets.keys())}"
-            )
+            # rtcsm 통합 파일: 각 시트의 '데이터구분' 컬럼으로 rtc / sm 분리
+            if matched_keyword == "rtcsm":
+                rtc_sheets, sm_sheets = {}, {}
+                for sheet_name, df in cleaned_sheets.items():
+                    if "데이터구분" not in df.columns:
+                        st.warning(
+                            f"⚠️ {file.name} / {sheet_name}: '데이터구분' 컬럼이 없어 "
+                            f"rtc/sm 분리 불가, 건너뜀."
+                        )
+                        continue
+                    kind = df["데이터구분"].astype(str).str.strip().str.lower()
+                    rtc_df = df[kind.eq("rtc")].reset_index(drop=True)
+                    sm_df = df[kind.eq("sm")].reset_index(drop=True)
+                    if not rtc_df.empty:
+                        rtc_sheets[sheet_name] = rtc_df
+                    if not sm_df.empty:
+                        sm_sheets[sheet_name] = sm_df
+
+                if rtc_sheets:
+                    cost_driver_dfs["rtc"] = rtc_sheets
+                if sm_sheets:
+                    cost_driver_dfs["sm"] = sm_sheets
+                st.success(
+                    f"✅ {file.name} → [rtcsm 통합] "
+                    f"rtc: {len(rtc_sheets)}시트 / sm: {len(sm_sheets)}시트 "
+                    f"(시트: {list(cleaned_sheets.keys())})"
+                )
+            else:
+                cost_driver_dfs[matched_keyword] = cleaned_sheets
+                st.success(
+                    f"✅ {file.name} → [{matched_keyword}] "
+                    f"선택된 시트: {list(cleaned_sheets.keys())}"
+                )
         else:
             if sheet_rule == "settlement" and settlement_candidates:
                 st.warning(
@@ -1768,7 +1797,7 @@ with tab1:
                 # 숫자/날짜 셀 포맷 적용
                 #  - 컬럼명에 '연도'/'년도' 포함: 포맷 적용 안 함 (천 단위 콤마도 X)
                 #  - 숫자: #,##0
-                #  - 날짜/datetime: 시간이 모두 00:00:00 이면 yyyy-mm-dd, 아니면 yyyy-mm-dd hh:mm:ss
+                #  - 날짜/datetime: 무조건 yyyy-mm-dd (시간 부분 제거)
                 import datetime as _dt
                 _YEAR_KEYWORDS = ("연도", "년도")
                 wb = writer.book
@@ -1783,19 +1812,13 @@ with tab1:
                         if any(kw in str(col_name) for kw in _YEAR_KEYWORDS):
                             continue
 
-                        # 1차 스캔: 컬럼이 datetime 타입인지, 시간이 모두 00:00:00 인지 판단
+                        # 1차 스캔: 컬럼이 datetime 타입인지 확인
                         is_date_col = False
-                        all_midnight = True
                         for row in range(2, ws.max_row + 1):
                             val = ws.cell(row=row, column=col_idx).value
-                            if isinstance(val, _dt.datetime):
+                            if isinstance(val, (_dt.datetime, _dt.date)):
                                 is_date_col = True
-                                if (val.hour, val.minute, val.second, val.microsecond) != (0, 0, 0, 0):
-                                    all_midnight = False
-                            elif isinstance(val, _dt.date):
-                                is_date_col = True
-
-                        date_fmt = "yyyy-mm-dd" if all_midnight else "yyyy-mm-dd hh:mm:ss"
+                                break
 
                         for row in range(2, ws.max_row + 1):
                             cell = ws.cell(row=row, column=col_idx)
@@ -1803,7 +1826,9 @@ with tab1:
                             if isinstance(val, bool):
                                 continue
                             if isinstance(val, _dt.datetime):
-                                cell.number_format = date_fmt
+                                # 시간 부분 제거 → 날짜만 저장
+                                cell.value = val.date()
+                                cell.number_format = "yyyy-mm-dd"
                             elif isinstance(val, _dt.date):
                                 cell.number_format = "yyyy-mm-dd"
                             elif isinstance(val, (int, float)) and not is_date_col:
@@ -1812,7 +1837,7 @@ with tab1:
 
         with col_dl:
             st.download_button(
-                "엑셀 다운로드",
+                "다운로드",
                 data=_build_monthly_split_excel_bytes(master_df),
                 file_name=f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

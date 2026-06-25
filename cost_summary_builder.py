@@ -45,6 +45,8 @@ from cost_summary_preprocess import (
     _merge_by_product_id,
     _allocate_amount,
     _normal_inbound_mask,
+    _excel_round,
+    _excel_round_series,
 )
 
 
@@ -322,16 +324,16 @@ def _allocate_amount_proportional(
     weight 합이 0이면 배부하지 않음 (분모 0 회피).
     """
     if total_amount == 0:
-        return
+        return 0.0, 0.0
     if row_mask is None:
         row_mask = pd.Series(True, index=final_df.index)
 
     weights = pd.to_numeric(weight_series[row_mask], errors="coerce").fillna(0)
     weights_sum = weights.sum()
     if weights_sum == 0:
-        return
+        return 0.0, float(weights_sum)
 
-    allocations = (weights / weights_sum * total_amount).round()
+    allocations = _excel_round_series(weights / weights_sum * total_amount)
     # int dtype 컬럼에 float 대입 방지 (pandas 2.x)
     final_df[target_column] = pd.to_numeric(
         final_df[target_column], errors="coerce"
@@ -348,6 +350,42 @@ def _allocate_amount_proportional(
             # 모든 가중치가 0 인 케이스 (도달 불가지만 안전장치)
             first_index = final_df.index[row_mask][0]
             final_df.loc[first_index, target_column] += remainder
+
+    actual_sum = pd.to_numeric(
+        final_df.loc[row_mask, target_column], errors="coerce"
+    ).fillna(0).sum()
+    return float(actual_sum), float(weights_sum)
+
+
+def _adjust_material_allocation_to_target(final_df, target_total, row_mask, weight_series):
+    """재료비_배부 합계가 목표 금액과 다르면 첫 배부 가능 행에 차이를 보정."""
+    if row_mask is None:
+        row_mask = pd.Series(True, index=final_df.index)
+
+    final_df["재료비_배부"] = pd.to_numeric(
+        final_df["재료비_배부"], errors="coerce"
+    ).fillna(0).astype(float)
+
+    values = pd.to_numeric(final_df.loc[row_mask, "재료비_배부"], errors="coerce").fillna(0)
+    current_total = float(values.sum())
+    remainder = float(target_total) - current_total
+    if abs(remainder) < 1e-9:
+        return current_total, 0.0
+
+    candidate_indices = list(values[values.ne(0)].index)
+    if not candidate_indices:
+        weights = pd.to_numeric(weight_series[row_mask], errors="coerce").fillna(0)
+        candidate_indices = list(weights[weights.ne(0)].index)
+    if not candidate_indices:
+        candidate_indices = list(final_df.index[row_mask])
+    if not candidate_indices:
+        return current_total, 0.0
+
+    final_df.loc[candidate_indices[0], "재료비_배부"] += remainder
+    adjusted_total = float(
+        pd.to_numeric(final_df.loc[row_mask, "재료비_배부"], errors="coerce").fillna(0).sum()
+    )
+    return adjusted_total, remainder
 
 
 def _find_settlement_month_column(columns, settlement_year, settlement_month):
@@ -501,7 +539,7 @@ def _append_material_paint_column(final_df, manufacturing_cost_sheet_dfs):
 
     분자: 재료비 시트에서 원가구분=='페인트' 행 금액 합
     분모: 공정별_도장 (=유효실측시간_도장) 행 전체 합
-    단가 = round(분자 / 분모) — 정수
+    단가 = Excel ROUND(분자 / 분모, 0) — 정수
     각 행 = 단가 × 그 행의 공정별_도장
 
     호출 시점: 공정별 컬럼이 이미 만들어진 후여야 한다.
@@ -603,6 +641,12 @@ def _append_material_cost_columns(
                 allocation_total,
                 final_df["재료비_직접"],
                 non_inspection_mask,
+            )
+            _adjust_material_allocation_to_target(
+                final_df,
+                allocation_total,
+                non_inspection_mask,
+                final_df["재료비_직접"],
             )
 
     # 3) 재료비_합 = 직접 + 배부
@@ -807,11 +851,11 @@ def _allocate_amount_proportional_rounded(
         return
 
     raw_allocations = weights / weights_sum * total_amount
-    allocations = raw_allocations.round()
+    allocations = raw_allocations.apply(_round_half_up)
 
     if adjust_remainder:
         remainder = total_amount - allocations.sum()
-        remainder_int = int(round(remainder))
+        remainder_int = _round_half_up(remainder)
         if remainder_int != 0:
             if remainder_int > 0:
                 priority = (raw_allocations - allocations).sort_values(ascending=False)
@@ -833,17 +877,8 @@ def _allocate_amount_proportional_rounded(
 
 
 def _round_half_up(value):
-    """스칼라 반올림 (0.5 는 올림). 파이썬 기본 round 의 banker's rounding 회피.
-
-    부동소수점 오차(예: 8059.5 가 8059.4999.. 로 저장되어 내림되는 문제)를 피하기 위해
-    decimal 로 정확히 반올림한다.
-    """
-    from decimal import Decimal, ROUND_HALF_UP
-    try:
-        # str(float) 로 변환하면 8059.5 처럼 사람이 보는 값으로 정규화됨
-        return int(Decimal(str(float(value))).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    except Exception:
-        return int(np.floor(float(value) + 0.5))
+    """Excel ROUND(value, 0) 과 같은 스칼라 반올림."""
+    return _excel_round(value, 0)
 
 
 
@@ -875,6 +910,39 @@ def _allocate_amount_by_rounded_unit_rate(
     final_df.loc[row_mask, target_column] = allocations.values
 
     return float(allocations.sum()), int(unit_rate)
+
+
+def _adjust_allocation_remainder_to_first_value(
+    final_df, target_column, target_total, row_mask=None, weight_series=None,
+):
+    """컬럼 합계가 목표 금액과 다르면 첫 배부 가능 행에 차이를 보정."""
+    if row_mask is None:
+        row_mask = pd.Series(True, index=final_df.index)
+
+    final_df[target_column] = pd.to_numeric(
+        final_df[target_column], errors="coerce"
+    ).fillna(0).astype(float)
+
+    values = pd.to_numeric(final_df.loc[row_mask, target_column], errors="coerce").fillna(0)
+    current_total = float(values.sum())
+    remainder = float(target_total) - current_total
+    if abs(remainder) < 1e-9:
+        return current_total, 0.0
+
+    candidate_indices = list(values[values.ne(0)].index)
+    if not candidate_indices and weight_series is not None:
+        weights = pd.to_numeric(weight_series[row_mask], errors="coerce").fillna(0)
+        candidate_indices = list(weights[weights.ne(0)].index)
+    if not candidate_indices:
+        candidate_indices = list(values.index)
+    if not candidate_indices:
+        return current_total, 0.0
+
+    final_df.loc[candidate_indices[0], target_column] += remainder
+    adjusted_total = float(
+        pd.to_numeric(final_df.loc[row_mask, target_column], errors="coerce").fillna(0).sum()
+    )
+    return adjusted_total, remainder
 
 
 def _append_manufacturing_expense_columns(
@@ -949,6 +1017,7 @@ def _append_manufacturing_expense_columns(
 
     if diagnostics is not None:
         diagnostics.append({
+            "구분": "제조경비",
             "컬럼": "제조경비_직접",
             "배부총액(분자)": direct_source_total,
             "실제배부값합": direct_matched_sum,
@@ -996,6 +1065,7 @@ def _append_manufacturing_expense_columns(
 
         if diagnostics is not None:
             diagnostics.append({
+                "구분": "제조경비",
                 "컬럼": column_name,
                 "배부총액(분자)": allocation_total,
                 "실제배부값합": column_actual,
@@ -1044,6 +1114,7 @@ def _append_manufacturing_expense_columns(
 
     if diagnostics is not None:
         diagnostics.append({
+            "구분": "제조경비",
             "컬럼": MANUFACTURING_EXPENSE_GIFT_COLUMN,
             "배부총액(분자)": gift_total,
             "실제배부값합": gift_actual,
@@ -1058,6 +1129,9 @@ def _append_manufacturing_expense_columns(
     # 기타배부 분자 = (각 항목 배부총액 분자의 합) − (각 항목 실제 배부값의 합)
     extra_allocation_total = numerator_sum - actual_sum
     extra_weight_sum = 0.0
+    extra_unit_rate = 0
+    extra_actual = 0.0
+    extra_remainder = 0.0
     if (
         extra_allocation_total != 0
         and "rtc_일수" in final_df.columns
@@ -1065,31 +1139,35 @@ def _append_manufacturing_expense_columns(
         extra_weight_sum = float(
             pd.to_numeric(final_df["rtc_일수"], errors="coerce").fillna(0).sum()
         )
-        _allocate_amount_proportional_rounded(
+        extra_actual, extra_unit_rate = _allocate_amount_by_rounded_unit_rate(
             final_df,
             MANUFACTURING_EXPENSE_EXTRA_ALLOCATION_COLUMN,
             extra_allocation_total,
             final_df["rtc_일수"],
-            adjust_remainder=True,
+        )
+        extra_actual, extra_remainder = _adjust_allocation_remainder_to_first_value(
+            final_df,
+            MANUFACTURING_EXPENSE_EXTRA_ALLOCATION_COLUMN,
+            extra_allocation_total,
+            weight_series=final_df["rtc_일수"],
         )
 
+    extra_remainder_note = ""
+    if abs(extra_remainder) >= 1e-9:
+        extra_remainder_note = f" / 차액 {extra_remainder:+,.0f} 첫 값 보정"
+
     if diagnostics is not None:
-        unit_rate = round(extra_allocation_total / extra_weight_sum) if extra_weight_sum else 0
-        extra_actual = float(
-            pd.to_numeric(
-                final_df[MANUFACTURING_EXPENSE_EXTRA_ALLOCATION_COLUMN],
-                errors="coerce",
-            ).fillna(0).sum()
-        )
         diagnostics.append({
+            "구분": "제조경비",
             "컬럼": MANUFACTURING_EXPENSE_EXTRA_ALLOCATION_COLUMN,
             "배부총액(분자)": extra_allocation_total,
             "실제배부값합": extra_actual,
             "가중치합(분모)": extra_weight_sum,
-            "단가": unit_rate,
+            "단가": extra_unit_rate,
             "비고": (
                 f"분자합 {numerator_sum:,.0f} - 실제배부합계 {actual_sum:,.0f}"
-                f" / 가중치=rtc_일수"
+                f" / 가중치=rtc_일수 (단가×가중치)"
+                f"{extra_remainder_note}"
             ),
         })
 
@@ -1150,17 +1228,54 @@ def _aggregate_labor_cost_by_target(manufacturing_cost_sheet_dfs):
     return dict(combined.groupby("배부대상")["차변"].sum())
 
 
-def _append_labor_cost_columns(final_df, manufacturing_cost_sheet_dfs):
+def _adjust_labor_remainder_to_first_value(
+    final_df, target_column, target_total, row_mask=None, weight_series=None,
+):
+    """노무비 세부 컬럼 합계가 분자와 다르면 값이 있는 첫 행에 차이를 보정."""
+    if row_mask is None:
+        row_mask = pd.Series(True, index=final_df.index)
+
+    values = pd.to_numeric(final_df.loc[row_mask, target_column], errors="coerce").fillna(0)
+    current_total = float(values.sum())
+    remainder = float(target_total) - current_total
+    if abs(remainder) < 1e-9:
+        return current_total, 0.0
+
+    candidate_indices = list(values[values.ne(0)].index)
+    if not candidate_indices and weight_series is not None:
+        weights = pd.to_numeric(weight_series[row_mask], errors="coerce").fillna(0)
+        candidate_indices = list(weights[weights.ne(0)].index)
+    if not candidate_indices:
+        candidate_indices = list(values.index)
+    if not candidate_indices:
+        return current_total, 0.0
+
+    first_index = candidate_indices[0]
+    final_df.loc[first_index, target_column] = (
+        pd.to_numeric(
+            pd.Series([final_df.loc[first_index, target_column]]), errors="coerce",
+        ).fillna(0).iloc[0]
+        + remainder
+    )
+    adjusted_total = float(
+        pd.to_numeric(final_df.loc[row_mask, target_column], errors="coerce").fillna(0).sum()
+    )
+    return adjusted_total, remainder
+
+
+def _append_labor_cost_columns(final_df, manufacturing_cost_sheet_dfs, diagnostics=None):
     """노무비_합계 / 전체 / RQI / 정비 / 판금 / 도장 / 선물 컬럼 추가.
 
     공통 (전체/RQI/정비/판금/도장):
         - 노무비 시트의 배부대상별 차변 합산 = 배부할 총액
-        - 그 총액을 공정별_{카테고리} 값에 비례하여 행별로 배부 (정수, 잔여는 첫 행)
+        - 단가를 반올림한 뒤 공정별_{카테고리} 값에 곱해 행별 배부
+        - 배부총액과 합계 차액은 값이 있는 첫 행에 보정
 
     노무비_선물 (다른 규칙):
         - 분자: 노무비 시트 배부대상=='선물' 차변 합
         - 분모/가중치: 분류1=='선물' 인 행의 rtc_일수
         - 분류1=='선물' 이 아닌 행은 0
+        - 배부총액과 합계 차액은 값이 있는 첫 행에 보정
 
     노무비_합계 = 위 6개 행별 합
     """
@@ -1181,21 +1296,56 @@ def _append_labor_cost_columns(final_df, manufacturing_cost_sheet_dfs):
             continue
 
         labor_total = float(labor_total_by_target.get(allocation_target, 0))
-        if labor_total == 0:
-            continue
-
-        _allocate_amount_proportional(
-            final_df,
-            column_name,
-            labor_total,
-            final_df[process_column],
+        weight_sum = float(
+            pd.to_numeric(final_df[process_column], errors="coerce").fillna(0).sum()
         )
+        actual_sum = 0.0
+        labor_remainder = 0.0
+
+        if labor_total != 0:
+            actual_sum, unit_rate = _allocate_amount_by_rounded_unit_rate(
+                final_df,
+                column_name,
+                labor_total,
+                final_df[process_column],
+            )
+            actual_sum, labor_remainder = _adjust_labor_remainder_to_first_value(
+                final_df,
+                column_name,
+                labor_total,
+                weight_series=final_df[process_column],
+            )
+        else:
+            unit_rate = 0
+
+        remainder_note = ""
+        if abs(labor_remainder) >= 1e-9:
+            remainder_note = f" / 차액 {labor_remainder:+,.0f} 첫 값 보정"
+
+        if diagnostics is not None:
+            diagnostics.append({
+                "구분": "노무비",
+                "컬럼": column_name,
+                "배부총액(분자)": labor_total,
+                "실제배부값합": actual_sum,
+                "가중치합(분모)": weight_sum,
+                "단가": unit_rate,
+                "비고": (
+                    f"노무비 시트(배부대상={allocation_target})"
+                    f" / 가중치={process_column}"
+                    " / 단가×가중치"
+                    f"{remainder_note}"
+                ),
+            })
 
     # 2) 노무비_선물 (분류1=='선물' 행의 rtc_일수 비율로 배부)
     gift_labor_total = float(labor_total_by_target.get(LABOR_COST_GIFT_TARGET, 0))
+    gift_labor_weight_sum = 0.0
+    gift_labor_actual_sum = 0.0
+    gift_labor_unit_rate = 0
+    gift_labor_remainder = 0.0
     if (
-        gift_labor_total != 0
-        and LABOR_COST_GIFT_FILTER_COLUMN in final_df.columns
+        LABOR_COST_GIFT_FILTER_COLUMN in final_df.columns
         and LABOR_COST_GIFT_WEIGHT_COLUMN in final_df.columns
     ):
         gift_mask = (
@@ -1203,13 +1353,51 @@ def _append_labor_cost_columns(final_df, manufacturing_cost_sheet_dfs):
             .eq(LABOR_COST_GIFT_FILTER_VALUE)
         )
         if gift_mask.any():
-            _allocate_amount_proportional(
-                final_df,
-                LABOR_COST_GIFT_COLUMN,
-                gift_labor_total,
-                final_df[LABOR_COST_GIFT_WEIGHT_COLUMN],
-                row_mask=gift_mask,
+            gift_labor_weight_sum = float(
+                pd.to_numeric(
+                    final_df.loc[gift_mask, LABOR_COST_GIFT_WEIGHT_COLUMN],
+                    errors="coerce",
+                ).fillna(0).sum()
             )
+            if gift_labor_total != 0:
+                gift_labor_actual_sum, gift_labor_unit_rate = _allocate_amount_by_rounded_unit_rate(
+                    final_df,
+                    LABOR_COST_GIFT_COLUMN,
+                    gift_labor_total,
+                    final_df[LABOR_COST_GIFT_WEIGHT_COLUMN],
+                    row_mask=gift_mask,
+                )
+                gift_labor_actual_sum, gift_labor_remainder = (
+                    _adjust_labor_remainder_to_first_value(
+                        final_df,
+                        LABOR_COST_GIFT_COLUMN,
+                        gift_labor_total,
+                        row_mask=gift_mask,
+                        weight_series=final_df[LABOR_COST_GIFT_WEIGHT_COLUMN],
+                    )
+                )
+            else:
+                gift_labor_unit_rate = 0
+
+    gift_remainder_note = ""
+    if abs(gift_labor_remainder) >= 1e-9:
+        gift_remainder_note = f" / 차액 {gift_labor_remainder:+,.0f} 첫 값 보정"
+
+    if diagnostics is not None:
+        diagnostics.append({
+            "구분": "노무비",
+            "컬럼": LABOR_COST_GIFT_COLUMN,
+            "배부총액(분자)": gift_labor_total,
+            "실제배부값합": gift_labor_actual_sum,
+            "가중치합(분모)": gift_labor_weight_sum,
+            "단가": gift_labor_unit_rate,
+            "비고": (
+                f"노무비 시트(배부대상={LABOR_COST_GIFT_TARGET})"
+                f" / 분류1='{LABOR_COST_GIFT_FILTER_VALUE}' 행의 {LABOR_COST_GIFT_WEIGHT_COLUMN}"
+                " / 단가×가중치"
+                f"{gift_remainder_note}"
+            ),
+        })
 
     # 3) 노무비_합계 = 6개 합
     component_columns = [c for c, _, _ in LABOR_COST_SPECS] + [LABOR_COST_GIFT_COLUMN]
@@ -1525,31 +1713,154 @@ _MASTER_TO_INVENTORY_COLUMN_MAP = {
     "매출원가_누적합계": "매출원가_전월",
 }
 
+_MASTER_TO_INVENTORY_DETAIL_COLUMNS = [
+    "신번호", "구번호", "차대번호", "차종", "차명",
+    "반납일자", "매입일자", "분류1", "분류2", "분류3", "분류4",
+    "매입연도", "매입월",
+]
+
 
 def _find_latest_cost_summary_path():
     """가장 최근 cost_summary_*.xlsx 경로 반환 (없으면 None).
 
-    빌더 파일 위치를 기준으로 부모 폴더(앱 루트) 를 먼저 검색,
-    그 다음 같은 폴더, 현재 작업 디렉토리 순으로 fallback.
+    빌더 파일 위치(앱 루트)를 먼저 검색하고, 그 다음 부모 폴더/현재 작업 디렉토리로 fallback.
     """
     import os
     import glob
 
     here = os.path.dirname(os.path.abspath(__file__))
-    parent = os.path.dirname(here)  # 부모 폴더 (코드가 pages 안에 있으면 앱 루트)
-    search_dirs = [parent, here, "."]
+    parent = os.path.dirname(here)
+    search_dirs = [here, parent, "."]
     matched = []
-    for d in search_dirs:
+    for priority, d in enumerate(search_dirs):
         try:
             for p in glob.glob(os.path.join(d, "cost_summary_*.xlsx")):
                 if os.path.exists(p) and os.path.getsize(p) > 0:
-                    matched.append(p)
+                    matched.append((p, priority))
         except Exception:
             pass
     if not matched:
         return None
-    matched = sorted(set(matched), key=lambda p: os.path.basename(p), reverse=True)
-    return matched[0]
+    matched = sorted(
+        matched,
+        key=lambda item: (os.path.basename(item[0]), -item[1]),
+        reverse=True,
+    )
+    return matched[0][0]
+
+
+def _get_previous_master_prepaid_product_ids(settlement_year, settlement_month):
+    """직전월 최종원가마스터에서 선매입 상품ID 집합 반환."""
+    if settlement_year is None or settlement_month is None:
+        return set()
+
+    settle_year = int(settlement_year)
+    settle_month = int(settlement_month)
+    if settle_month == 1:
+        prev_year, prev_month = settle_year - 1, 12
+    else:
+        prev_year, prev_month = settle_year, settle_month - 1
+
+    path = _find_latest_cost_summary_path()
+    if path is None:
+        return set()
+    try:
+        master_df = pd.read_excel(path, sheet_name="최종원가마스터")
+    except Exception:
+        try:
+            master_df = pd.read_excel(path)
+        except Exception:
+            return set()
+
+    if master_df is None or master_df.empty:
+        return set()
+    if not {"회계연도", "회계월", "상품ID"}.issubset(master_df.columns):
+        return set()
+
+    yr = pd.to_numeric(master_df["회계연도"], errors="coerce")
+    mo = pd.to_numeric(master_df["회계월"], errors="coerce")
+    prev_rows = master_df[yr.eq(prev_year) & mo.eq(prev_month)].copy()
+    if prev_rows.empty:
+        return set()
+
+    prepaid_column = next(
+        (column for column in ("선매입여부", "선매입", "선매입 여부") if column in prev_rows.columns),
+        None,
+    )
+    if prepaid_column is None:
+        return set()
+
+    prepaid = prev_rows[prepaid_column].astype(str).str.strip().eq("선매입")
+    return set(
+        prev_rows.loc[prepaid, "상품ID"]
+        .dropna().astype(str).str.strip()
+        .replace("", pd.NA).dropna()
+    )
+
+
+def _get_previous_master_cost_group_df(settlement_year, settlement_month):
+    """직전월 마스터에서 사내/위탁매출의 제조원가 전월누적 조회용 DataFrame 반환."""
+    if settlement_year is None or settlement_month is None:
+        return None
+
+    settle_year = int(settlement_year)
+    settle_month = int(settlement_month)
+    if settle_month == 1:
+        prev_year, prev_month = settle_year - 1, 12
+    else:
+        prev_year, prev_month = settle_year, settle_month - 1
+
+    path = _find_latest_cost_summary_path()
+    if path is None:
+        return None
+    try:
+        master_df = pd.read_excel(path, sheet_name="최종원가마스터")
+    except Exception:
+        try:
+            master_df = pd.read_excel(path)
+        except Exception:
+            return None
+
+    required = {"회계연도", "회계월", "상품ID", "매출구분"}
+    if master_df is None or master_df.empty or not required.issubset(master_df.columns):
+        return None
+
+    yr = pd.to_numeric(master_df["회계연도"], errors="coerce")
+    mo = pd.to_numeric(master_df["회계월"], errors="coerce")
+    sales_type = master_df["매출구분"].astype(str).str.strip()
+    rows = master_df[
+        yr.eq(prev_year)
+        & mo.eq(prev_month)
+        & sales_type.isin(["사내매출", "위탁매출"])
+    ].copy()
+    if rows.empty:
+        return None
+
+    if "기말_수량" in rows.columns:
+        ending_qty = pd.to_numeric(rows["기말_수량"], errors="coerce").fillna(0)
+        rows = rows[ending_qty.eq(1)]
+    if rows.empty:
+        return None
+
+    source_to_target = {
+        "재료비_누적합계": "재료비_전월누적",
+        "노무비_누적합계": "노무비_전월누적",
+        "제조경비_누적합계": "제조경비_전월누적",
+    }
+    available_sources = [src for src in source_to_target if src in rows.columns]
+    if not available_sources:
+        return None
+
+    rows["상품ID"] = rows["상품ID"].astype(str).str.strip()
+    rows = rows[rows["상품ID"].ne("")]
+    if rows.empty:
+        return None
+
+    for src in available_sources:
+        rows[src] = pd.to_numeric(rows[src], errors="coerce").fillna(0)
+
+    previous_df = rows.groupby("상품ID", as_index=False)[available_sources].sum()
+    return previous_df.rename(columns=source_to_target)
 
 
 def _build_inventory_df_from_master(settlement_year, settlement_month):
@@ -1632,6 +1943,11 @@ def _build_inventory_df_from_master(settlement_year, settlement_month):
     else:
         return None
 
+    # 1번 원가대상 상세 컬럼 보존: 전월 마스터의 신번호~매입월 값을 그대로 싣는다.
+    for column in _MASTER_TO_INVENTORY_DETAIL_COLUMNS:
+        if column in prev_rows.columns:
+            inv[column] = prev_rows[column].values
+
     # 컬럼 매핑 적용
     for master_col, inventory_col in _MASTER_TO_INVENTORY_COLUMN_MAP.items():
         if master_col in prev_rows.columns:
@@ -1644,7 +1960,9 @@ def _build_inventory_df_from_master(settlement_year, settlement_month):
     # {전월}월 기말여부 = 1 (빌더가 이 컬럼으로 전월 기말 행 필터)
     inv[f"{prev_month}월 기말여부"] = 1
 
-    return inv.reset_index(drop=True)
+    result = inv.reset_index(drop=True)
+    result.attrs["_from_master_inventory"] = True
+    return result
 
 
 def _build_consignment_outbound_counts(consignment_ledger_df, settlement_month):
@@ -1909,7 +2227,7 @@ def _append_inventory_quantity_amount_columns(
 
 
 def _append_cost_group_cumulative_columns(
-    final_df, inventory_df, settlement_month,
+    final_df, inventory_df, settlement_month, settlement_year=None,
 ):
     """재료비 / 노무비 / 제조경비 의 누적합계·전월누적·당월 컬럼 부여.
 
@@ -1925,6 +2243,9 @@ def _append_cost_group_cumulative_columns(
         ("노무비", LABOR_COST_TOTAL_COLUMN),       # 노무비_합계
         ("제조경비", "제조경비_합계"),
     ]
+    from_master_inventory = bool(
+        getattr(inventory_df, "attrs", {}).get("_from_master_inventory")
+    )
 
     # 1) 당월값 + 전월누적 0 초기화
     for group_name, source_column in group_specs:
@@ -1984,6 +2305,25 @@ def _append_cost_group_cumulative_columns(
                     final_df[col], errors="coerce"
                 ).fillna(0)
 
+    if from_master_inventory:
+        previous_master_df = _get_previous_master_cost_group_df(
+            settlement_year, settlement_month,
+        )
+        if previous_master_df is not None and not previous_master_df.empty:
+            target_columns = [
+                column for column in [
+                    "재료비_전월누적", "노무비_전월누적", "제조경비_전월누적",
+                ]
+                if column in previous_master_df.columns
+            ]
+            if target_columns:
+                final_df = final_df.drop(columns=target_columns)
+                final_df = _merge_by_product_id(final_df, previous_master_df, target_columns)
+                for column in target_columns:
+                    final_df[column] = pd.to_numeric(
+                        final_df[column], errors="coerce"
+                    ).fillna(0)
+
     # 3) 누적합계 = 전월누적 + 당월
     for group_name, _ in group_specs:
         final_df[f"{group_name}_누적합계"] = (
@@ -1991,12 +2331,21 @@ def _append_cost_group_cumulative_columns(
             + pd.to_numeric(final_df[f"{group_name}_당월"], errors="coerce").fillna(0)
         )
 
-    # 3-1) 타사차량 행은 재료비/노무비/제조경비의 전월누적만 0
-    #      (당월값과 누적합계는 그대로 유지)
-    if "당사/타사" in final_df.columns:
-        own_vehicle_rows = final_df["당사/타사"].astype(str).str.strip().eq("당사차량")
-        non_own = ~own_vehicle_rows
-        if non_own.any():
+    # 3-1) 일반 기초재고는 당사차량만 전월누적 유지.
+    #      전월 마스터 자동 기초재고는 사내매출/위탁매출의 전월누적을 유지.
+    if "당사/타사" in final_df.columns or "매출구분" in final_df.columns:
+        if from_master_inventory and "매출구분" in final_df.columns:
+            keep_previous_rows = (
+                final_df["매출구분"].astype(str).str.strip()
+                .isin(["사내매출", "위탁매출"])
+            )
+        elif "당사/타사" in final_df.columns:
+            keep_previous_rows = final_df["당사/타사"].astype(str).str.strip().eq("당사차량")
+        else:
+            keep_previous_rows = pd.Series(True, index=final_df.index)
+
+        reset_previous_rows = ~keep_previous_rows
+        if reset_previous_rows.any():
             zero_columns = [
                 f"{group_name}_전월누적"
                 for group_name, _ in group_specs
@@ -2006,7 +2355,7 @@ def _append_cost_group_cumulative_columns(
                 final_df[col] = pd.to_numeric(
                     final_df[col], errors="coerce"
                 ).fillna(0).astype(float)
-            final_df.loc[non_own, existing] = 0
+            final_df.loc[reset_previous_rows, existing] = 0
             # 전월누적이 바뀌었으니 누적합계 재계산 (당월 + 새 전월누적)
             for group_name, _ in group_specs:
                 final_df[f"{group_name}_누적합계"] = (
@@ -2060,22 +2409,26 @@ def _reorder_final_columns(
     final_df = _append_process_category_columns(final_df, combined_cost_driver_df)
     # 재료비_페인트: 공정별_도장 이 만들어진 후 호출 (도장 시간 비례)
     final_df = _append_material_paint_column(final_df, manufacturing_cost_sheet_dfs)
+    cost_allocation_diagnostics = []
     # 노무비는 공정별 컬럼이 채워진 후에 계산해야 함 (분모로 공정별_*_합 사용)
-    final_df = _append_labor_cost_columns(final_df, manufacturing_cost_sheet_dfs)
-    manufacturing_expense_diagnostics = []
+    final_df = _append_labor_cost_columns(
+        final_df,
+        manufacturing_cost_sheet_dfs,
+        diagnostics=cost_allocation_diagnostics,
+    )
     final_df = _append_manufacturing_expense_columns(
         final_df,
         manufacturing_cost_sheet_dfs,
         verification_sheets=verification_sheets,
         settlement_year=settlement_year,
         settlement_month=settlement_month,
-        diagnostics=manufacturing_expense_diagnostics,
+        diagnostics=cost_allocation_diagnostics,
     )
     # 진단 내역을 결과 DataFrame 의 attrs 에 저장 (UI 에서 표시용)
-    final_df.attrs["제조경비_배부내역"] = manufacturing_expense_diagnostics
+    final_df.attrs["제조경비_배부내역"] = cost_allocation_diagnostics
     # df.attrs 가 이후 연산/캐시로 사라질 수 있으므로 모듈 레벨에도 백업
     global _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS
-    _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS = manufacturing_expense_diagnostics
+    _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS = cost_allocation_diagnostics
 
     # 제조경비_합계 = 직접 + 임차 + 전체 + RQI + 정비 + 판금 + 도장 + 선물 + 기타배부
     manufacturing_expense_all_columns = (
@@ -2092,7 +2445,7 @@ def _reorder_final_columns(
 
     # 재료비/노무비/제조경비 누적합계·전월누적·당월 컬럼 (제조경비_합계 계산 후)
     final_df = _append_cost_group_cumulative_columns(
-        final_df, inventory_df, settlement_month,
+        final_df, inventory_df, settlement_month, settlement_year=settlement_year,
     )
 
     # 수량/금액 묶음 + 출고/기말 (제조원가_당월 이 만들어진 후)
@@ -2429,6 +2782,9 @@ def build_final_cost_df(
     # 숫자화
     for column in FINAL_COST_AMOUNT_COLUMNS:
         final_df[column] = pd.to_numeric(final_df[column], errors="coerce").fillna(0)
+    final_df[PAYBACK_RETURN_COLUMN] = (
+        _excel_round_series(final_df[PAYBACK_RETURN_COLUMN]).fillna(0)
+    )
 
     # 4) 타사차량 행은 모든 금액 0
     own_vehicle_rows = None

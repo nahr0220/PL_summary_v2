@@ -38,6 +38,7 @@ from cost_summary_preprocess import (
     preprocess_sales,
     preprocess_waste_resource_file,
     workbook_to_excel_bytes,
+    _excel_round,
 )
 from cost_summary_builder import build_final_cost_df, get_last_manufacturing_expense_diagnostics
 
@@ -56,7 +57,7 @@ def _build_input_fingerprint(*dfs_and_values):
             )
         except Exception:
             numeric_sum = 0.0
-        return (df.shape, tuple(map(str, df.columns)), round(numeric_sum, 2))
+        return (df.shape, tuple(map(str, df.columns)), _excel_round(numeric_sum, 2))
 
     parts = []
     for item in dfs_and_values:
@@ -221,7 +222,7 @@ def process_base_file(fname, file, dfs, settlement_month):
     elif "검사매출" in fname:
         dfs["검사매출"] = preprocess_sales(file)
     elif "정비매출" in fname:
-        dfs["정비매출"] = preprocess_sales(file)
+        dfs["정비매출"] = preprocess_sales(file, exclude_partner="현대자동차(주)")
 
 
 def process_opening_inventory_files(file_map, dfs):
@@ -267,7 +268,33 @@ def render_base_upload(settlement_year, settlement_month):
         isinstance(inventory_now, pd.DataFrame) and inventory_now.empty
     ):
         try:
-            from cost_summary_builder import _build_inventory_df_from_master
+            from cost_summary_builder import (
+                _build_inventory_df_from_master,
+                _get_previous_master_prepaid_product_ids,
+            )
+            prepaid_product_ids = _get_previous_master_prepaid_product_ids(
+                settlement_year, settlement_month,
+            )
+            if (
+                prepaid_product_ids
+                and isinstance(dfs.get("매입조회"), pd.DataFrame)
+                and not dfs["매입조회"].empty
+            ):
+                before_count = len(dfs["매입조회"])
+                prepaid_filter_df = pd.DataFrame({
+                    "상품ID": sorted(prepaid_product_ids),
+                    "선매입여부": ["선매입"] * len(prepaid_product_ids),
+                })
+                dfs["매입조회"] = filter_purchase_inquiry(
+                    dfs["매입조회"], prepaid_filter_df,
+                )
+                removed_count = before_count - len(dfs["매입조회"])
+                if removed_count > 0:
+                    st.info(
+                        f"전월 마스터 선매입 차량 {removed_count:,}건을 "
+                        "매입조회에서 제외했습니다."
+                    )
+
             auto_inv = _build_inventory_df_from_master(
                 settlement_year, settlement_month,
             )
@@ -350,6 +377,7 @@ def preprocess_purchase_cost_files(
             product_ledger_df = preprocess_product_ledger(
                 file, product_id_df, dfs.get("기초재고_전체"),
                 settlement_year, settlement_month,
+                product_id_df=product_id_df,
             )
             label = _unique_sheet_label(cost_sheet_dfs, "상품원장")
             cost_sheet_dfs[label] = product_ledger_df
@@ -370,8 +398,8 @@ def preprocess_purchase_cost_files(
             file_label = file.name.rsplit(".", 1)[0]
 
             if "폐자원" in file.name:
-                if product_id_df.empty and product_ledger_lookup_df.empty:
-                    st.warning("폐자원 파일의 상품ID를 가져오려면 1번 기초 DB 또는 상품원장 파일도 함께 업로드하세요.")
+                if product_id_df.empty:
+                    st.warning("폐자원 파일의 상품ID를 가져오려면 1번 원가대상 파일을 먼저 업로드하세요.")
                 file_sheets = preprocess_waste_resource_file(
                     file, product_ledger_lookup_df, product_id_df,
                 )
@@ -707,7 +735,17 @@ COMBINED_DRIVER_COLUMNS = [
 ]
 
 # 구분 변환 규칙 (공정 → 구분)
+# 엑셀 수식 동등:
+#   IF(공정 IN {"RQI","차옥션성능","법적성능","TS"}, "RQI",
+#     IF(공정="TU","정비",
+#       IF(공정="PL","판금",
+#         IF(공정="PA","도장", 공정))))
 PROCESS_TO_CATEGORY = {
+    "RQI": "RQI",
+    "차옥션성능": "RQI",
+    "법적성능": "RQI",
+    "법정성능": "RQI",
+    "TS": "RQI",
     "TU": "정비",
     "PL": "판금",
     "PA": "도장",
@@ -798,6 +836,35 @@ def _parse_date_value(value):
         return pd.to_datetime(text, format="%Y%m%d", errors="coerce")
 
     return pd.to_datetime(value, errors="coerce")
+
+
+
+def _numeric_month_series(series):
+    """'2', '02', '2월' 같은 월 값을 숫자로 변환."""
+    text = series.astype(str).str.strip()
+    text = text.str.replace(r"\.0$", "", regex=True)
+    text = text.str.extract(r"(\d{1,2})", expand=False)
+    return pd.to_numeric(text, errors="coerce")
+
+
+def _filter_cost_driver_sheet_by_settlement_period(df, settlement_year, settlement_month):
+    """원가동인 원본 행을 결산연도/월에 해당하는 행만 남긴다."""
+    if (
+        df is None or df.empty
+        or settlement_year is None or settlement_month is None
+    ):
+        return df
+
+    year = int(settlement_year)
+    month = int(settlement_month)
+    work = df.copy()
+
+    if "회계연도" in work.columns and "회계월" in work.columns:
+        year_values = pd.to_numeric(work["회계연도"], errors="coerce")
+        month_values = _numeric_month_series(work["회계월"])
+        return work[year_values.eq(year) & month_values.eq(month)].copy()
+
+    return work
 
 
 def _parse_time_value(value):
@@ -950,7 +1017,7 @@ def _calculate_measurement_hours(
 
         current_day = current_day + pd.Timedelta(days=1)
 
-    return round(total_seconds / 3600.0, 2)
+    return _excel_round(total_seconds / 3600.0, 2)
 
 
 def _build_segment_to_product_id_lookups_local(detail_df):
@@ -1023,14 +1090,24 @@ def _enrich_with_sales_type_and_product_id(
             for key in car_keys
         ]
 
-    # 매출구분 우선순위: 정비 → 위탁 → 사내
+    # 매출구분 우선순위:
+    #   1) 공정 == "TS" → 검사매출 (공정 자체로 결정)
+    #   2) 정비매출 > 0 → 정비매출
+    #   3) 위탁매출 > 0 → 위탁매출
+    #   4) 사내매출 > 0 → 사내매출
+    process_series = (
+        combined_df["공정"].astype(str).str.strip()
+        if "공정" in combined_df.columns
+        else pd.Series([""] * len(combined_df), index=combined_df.index)
+    )
     combined_df["매출구분"] = np.select(
         [
+            process_series.eq("TS"),
             combined_df["정비매출"].gt(0),
             combined_df["위탁매출"].gt(0),
             combined_df["사내매출"].gt(0),
         ],
-        ["정비매출", "위탁매출", "사내매출"],
+        ["검사매출", "정비매출", "위탁매출", "사내매출"],
         default="",
     )
 
@@ -1099,6 +1176,11 @@ def build_combined_cost_driver_df(
             if df is None or df.empty:
                 continue
             try:
+                df = _filter_cost_driver_sheet_by_settlement_period(
+                    df, settlement_year, settlement_month,
+                )
+                if df is None or df.empty:
+                    continue
                 normalized = normalizer(df, sheet_name)
             except Exception as exc:
                 st.warning(f"[{keyword} / {sheet_name}] 통합 중 오류: {exc}")
@@ -1119,7 +1201,7 @@ def build_combined_cost_driver_df(
     holiday_set = _build_korean_holiday_checker(year_hint=settlement_year)
 
     def _row_hours(row):
-        if str(row["구분"]).strip() == "TS":
+        if str(row["공정"]).strip() == "TS":
             return 0.5
         return _calculate_measurement_hours(
             row["최초측정일"], row["최초측정시간"],
@@ -1250,7 +1332,7 @@ def render_final_cost(
     if not purchase_cost_sheet_dfs:
         st.info("2-1 매입원가의 상품원장 데이터를 업로드하면 금액 컬럼이 채워집니다.")
 
-    # 제조경비 배부 내역 (분자 / 분모 / 단가)
+    # 노무비/제조경비 배부 내역 (분자 / 분모 / 단가)
     # 캐시된 진단 우선 → attrs → 모듈 백업 순
     expense_diagnostics = _cached_diag
     if not expense_diagnostics:
@@ -1258,13 +1340,13 @@ def render_final_cost(
     if not expense_diagnostics:
         expense_diagnostics = get_last_manufacturing_expense_diagnostics()
     if expense_diagnostics:
-        with st.expander("🔍 제조경비 배부 내역 (배부총액 ÷ 가중치합 = 단가)"):
+        with st.expander("🔍 노무비/제조경비 배부 내역 (배부총액 ÷ 가중치합 = 단가)"):
             diag_df = pd.DataFrame(expense_diagnostics)
             display_diag = diag_df.copy()
 
-            # 컬럼 순서: 컬럼 / 배부총액(분자) / 실제배부값합 / 가중치합(분모) / 단가 / 비고
+            # 컬럼 순서: 구분 / 컬럼 / 배부총액(분자) / 실제배부값합 / 가중치합(분모) / 단가 / 비고
             preferred_order = [
-                "컬럼", "배부총액(분자)", "실제배부값합",
+                "구분", "컬럼", "배부총액(분자)", "실제배부값합",
                 "가중치합(분모)", "단가", "비고",
             ]
             ordered = [c for c in preferred_order if c in display_diag.columns]
@@ -1275,7 +1357,7 @@ def render_final_cost(
             for col in ["배부총액(분자)", "실제배부값합"]:
                 if col in display_diag.columns:
                     display_diag[col] = display_diag[col].apply(
-                        lambda v: f"{round(v):,}" if isinstance(v, (int, float)) else v
+                        lambda v: f"{_excel_round(v):,}" if isinstance(v, (int, float)) else v
                     )
             # 가중치합(분모): 실제 계산에 쓰는 소수값 그대로 표시 (라운드하면 단가 검산이 안 맞음)
             if "가중치합(분모)" in display_diag.columns:
@@ -1564,7 +1646,7 @@ def _compute_accounting_tables(master_df):
         base_q = s(in_house, "기초_수량"); base_a = s(in_house, "기초_금액")
         normal_in_q = s(in_house, "정상입고_수량"); normal_in_a = s(in_house, "정상입고_금액")
         transfer_in_q = s(in_house, "타처입고_수량"); transfer_in_a = s(in_house, "타처입고_금액")
-        mfg_a = s(month_mask, "제조원가_당월")
+        mfg_a = s(in_house, "제조원가_당월")
         in_q = normal_in_q + transfer_in_q
         in_a = normal_in_a + transfer_in_a + mfg_a
         normal_out_q = s(in_house, "정상출고_수량"); normal_out_a = s(in_house, "정상출고_금액")

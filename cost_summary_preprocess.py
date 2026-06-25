@@ -91,6 +91,67 @@ BASE_DF_KEYS = [
 HIDDEN_BASE_DF_KEYS = ["기초재고_전체", "위탁수불부_전체"]
 
 
+def _sort_product_id_df(df):
+    """1번 원가대상 생성 직후 적용할 행 정렬."""
+    if df is None or df.empty:
+        return df
+
+    work = df.copy()
+    sales_order = {"사내매출": 0, "위탁매출": 1, "검사매출": 2, "정비매출": 3}
+    sales_key = (
+        work["매출구분"].astype(str).str.strip().map(sales_order).fillna(99)
+        if "매출구분" in work.columns
+        else pd.Series(99, index=work.index)
+    )
+
+    def _num_col(column):
+        if column not in work.columns:
+            return pd.Series(0, index=work.index)
+        return pd.to_numeric(work[column], errors="coerce").fillna(0)
+
+    qty_key = pd.Series(3, index=work.index)
+    qty_key = qty_key.mask(_num_col("타처입고").eq(1), 2)
+    qty_key = qty_key.mask(_num_col("정상입고").eq(1), 1)
+    qty_key = qty_key.mask(_num_col("기초재고").eq(1), 0)
+
+    own_mask = (
+        work["당사/타사"].astype(str).str.strip().eq("당사차량")
+        if "당사/타사" in work.columns
+        else pd.Series(False, index=work.index)
+    )
+    purchase_date = (
+        pd.to_datetime(work["매입일자"], errors="coerce")
+        if "매입일자" in work.columns
+        else pd.Series(pd.NaT, index=work.index)
+    )
+    return_date = (
+        pd.to_datetime(work["반납일자"], errors="coerce")
+        if "반납일자" in work.columns
+        else pd.Series(pd.NaT, index=work.index)
+    )
+    date_key = purchase_date.where(own_mask, return_date)
+
+    work["_sales_key"] = sales_key.values
+    work["_qty_key"] = qty_key.values
+    work["_date_key"] = date_key.values
+    work["_product_id_key"] = (
+        work["상품ID"].astype(str).str.strip()
+        if "상품ID" in work.columns
+        else pd.Series("", index=work.index)
+    ).values
+
+    return (
+        work.sort_values(
+            by=["_sales_key", "_qty_key", "_date_key", "_product_id_key"],
+            ascending=[True, True, True, True],
+            na_position="last",
+            kind="stable",
+        )
+        .drop(columns=["_sales_key", "_qty_key", "_date_key", "_product_id_key"])
+        .reset_index(drop=True)
+    )
+
+
 # ============================================================
 # 2. 공통 헬퍼
 # ============================================================
@@ -178,6 +239,32 @@ def _merge_by_product_id(target_df, source_df, value_columns):
     return merged.drop(columns=["_상품ID_lookup"])
 
 
+def _excel_round(value, digits=0):
+    """Excel ROUND 와 같은 반올림. 0.5 는 0에서 먼 방향으로 반올림한다."""
+    from decimal import Decimal, ROUND_HALF_UP
+
+    if pd.isna(value):
+        return np.nan
+
+    try:
+        digits = int(digits)
+        number = Decimal(str(float(value)))
+        quantizer = Decimal("1").scaleb(-digits)
+        rounded = number.quantize(quantizer, rounding=ROUND_HALF_UP)
+    except Exception:
+        return value
+
+    if digits == 0:
+        return int(rounded)
+    return float(rounded)
+
+
+def _excel_round_series(series, digits=0):
+    """Series/DataFrame 컬럼에 Excel ROUND 방식 적용."""
+    numeric = pd.to_numeric(series, errors="coerce")
+    return numeric.apply(lambda value: _excel_round(value, digits))
+
+
 def _allocate_amount(final_df, target_column, total_amount, row_mask):
     """row_mask 행에 total_amount 를 균등 배부 (잔여는 첫 행에 가산)."""
     if total_amount == 0:
@@ -186,7 +273,7 @@ def _allocate_amount(final_df, target_column, total_amount, row_mask):
     if allocation_count == 0:
         return
 
-    allocation_value = round(total_amount / allocation_count)
+    allocation_value = _excel_round(total_amount / allocation_count)
     final_df.loc[row_mask, target_column] = allocation_value
 
     remainder = total_amount - allocation_value * allocation_count
@@ -446,12 +533,15 @@ def preprocess_consignment_ledger(file, settlement_month):
     return df, opening_df, inbound_df
 
 
-def preprocess_sales(file):
+def preprocess_sales(file, exclude_partner=None):
     """검사매출 / 정비매출"""
     df = _ensure_product_id(_strip_columns(pd.read_excel(file)))
 
     if "세부내역" in df.columns:
         df = df[~df["세부내역"].astype(str).str.contains("보증수리", na=False)].copy()
+    if exclude_partner and "거래처" in df.columns:
+        partner = df["거래처"].astype(str).str.strip()
+        df = df[~partner.eq(str(exclude_partner).strip())].copy()
     if "상품ID" in df.columns:
         df = df.drop_duplicates(subset=["상품ID"]).copy()
     return df
@@ -478,7 +568,7 @@ def preprocess_opening_inventory(file, base_df):
 
 
 def filter_purchase_inquiry(df_purchase, df_inventory_all):
-    """매입조회에서 기초재고(선매입==1) 상품ID 제외."""
+    """매입조회에서 기초재고/전월마스터 선매입 상품ID 제외."""
     if df_purchase is None or df_purchase.empty:
         return df_purchase
 
@@ -486,16 +576,32 @@ def filter_purchase_inquiry(df_purchase, df_inventory_all):
 
     if df_inventory_all is None or df_inventory_all.empty:
         return df_purchase
-    required_columns = ["상품ID", "선매입 여부"]
-    if any(column not in df_inventory_all.columns for column in required_columns):
-        return df_purchase
     if "상품ID" not in df_purchase.columns:
         return df_purchase
+    if "상품ID" not in df_inventory_all.columns:
+        return df_purchase
+
+    prepaid_columns = [
+        column
+        for column in ("선매입 여부", "선매입여부", "선매입")
+        if column in df_inventory_all.columns
+    ]
+    if not prepaid_columns:
+        return df_purchase
+
+    prepaid_mask = pd.Series(False, index=df_inventory_all.index)
+    for column in prepaid_columns:
+        values = df_inventory_all[column].astype(str).str.strip()
+        prepaid_mask = prepaid_mask | values.eq("선매입") | _is_flag_one(df_inventory_all[column])
 
     excluded_ids = set(
-        df_inventory_all.loc[df_inventory_all["선매입 여부"] == 1, "상품ID"]
+        df_inventory_all.loc[prepaid_mask, "상품ID"]
         .dropna().astype(str).str.strip()
     )
+    excluded_ids.discard("")
+    if not excluded_ids:
+        return df_purchase
+
     purchase_ids = df_purchase["상품ID"].fillna("").astype(str).str.strip()
     return df_purchase[~purchase_ids.isin(excluded_ids)].copy()
 
@@ -523,13 +629,12 @@ def _build_detail_frame(df, date_column):
     detail["차종"] = _get_first_existing_column(temp, ["차종"])
     detail["차명"] = _get_first_existing_column(temp, ["차명", "차량명"])
     detail["반납일자"] = _get_first_existing_column(temp, ["반납일자"])
-    detail["매입일자"] = (
-        "" if date_column is None else _get_first_existing_column(temp, [date_column])
-    )
-    detail["분류1"] = _get_first_existing_column(temp, ["신매입유형1", "매입유형-분류1"])
-    detail["분류2"] = _get_first_existing_column(temp, ["신매입유형2", "매입유형-분류2"])
-    detail["분류3"] = _get_first_existing_column(temp, ["신매입유형3", "매입유형-분류3"])
-    detail["분류4"] = _get_first_existing_column(temp, ["채널", "매입채널", "매입유형-분류4"])
+    date_candidates = [date_column, "매입일자"] if date_column is not None else ["매입일자"]
+    detail["매입일자"] = _get_first_existing_column(temp, date_candidates)
+    detail["분류1"] = _get_first_existing_column(temp, ["신매입유형1", "매입유형-분류1", "분류1"])
+    detail["분류2"] = _get_first_existing_column(temp, ["신매입유형2", "매입유형-분류2", "분류2"])
+    detail["분류3"] = _get_first_existing_column(temp, ["신매입유형3", "매입유형-분류3", "분류3"])
+    detail["분류4"] = _get_first_existing_column(temp, ["채널", "매입채널", "매입유형-분류4", "분류4"])
 
     return detail.drop_duplicates(subset=["상품ID"], keep="first").reset_index(drop=True)
 
@@ -794,7 +899,7 @@ def collect_product_ids(dfs, settlement_year=None, settlement_month=None):
     merged = merged.drop(columns=["_출처", "_입고구분"])
     merged = merged.rename(columns={"구분1": "당사/타사", "구분2": "매출구분"})
     merged = merged[PRODUCT_ID_COLUMNS]
-    return merged.sort_values("상품ID").reset_index(drop=True)
+    return _sort_product_id_df(merged)
 
 
 # ============================================================
@@ -860,15 +965,75 @@ def extract_car_number(row):
         return "결산"
     if text.endswith("지게차"):
         return "지게차"
-    if cost_type in ("페이백(반납)", "페이백(미반납)", "폐자원공제"):
+    if cost_type in ("페이백(반납)", "페이백(미반납)", "폐자원공제", "초과운행"):
         return "확인필요"
 
-    match = re.search(r"\d{2,3}[^\d]\d{4}", text)
+    region_prefix = (
+        "서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주"
+    )
+    match = re.search(rf"(?:{region_prefix})?\d{{2,3}}[가-힣]\d{{4}}", text)
+    if not match:
+        match = re.search(r"\d{2,3}[^\d]\d{4}", text)
     return match.group() if match else ""
 
 
-def _append_product_ledger_purchase_columns(df, detail_df, inventory_all_df=None):
-    """상품원장에 상품ID, 매입유형 컬럼 부여."""
+def _lookup_product_id_from_product_id_df(car_number, accounting_month, product_id_df):
+    """product_id_df 에서 상품원장 행에 매칭되는 상품ID 반환.
+
+    조건 (엑셀 수식 동등):
+      매출구분 == "사내매출"
+      AND (신번호 == 차량번호 OR 구번호 == 차량번호)
+      AND 회계월 == accounting_month
+    매칭 행 없으면 빈 문자열 반환.
+    """
+    if product_id_df is None or product_id_df.empty:
+        return ""
+    if not car_number:
+        return ""
+
+    if "매출구분" not in product_id_df.columns:
+        return ""
+
+    sales_type = product_id_df["매출구분"].astype(str).str.strip()
+    mask = sales_type.eq("사내매출")
+
+    if "회계월" in product_id_df.columns and accounting_month is not None:
+        try:
+            month_int = int(accounting_month)
+        except (TypeError, ValueError):
+            month_int = None
+        if month_int is not None:
+            month_series = pd.to_numeric(product_id_df["회계월"], errors="coerce")
+            mask = mask & month_series.eq(month_int)
+
+    car_norm = _normalize_lookup_value(car_number)
+    if "신번호" in product_id_df.columns:
+        new_no = product_id_df["신번호"].apply(_normalize_lookup_value)
+    else:
+        new_no = pd.Series([""] * len(product_id_df), index=product_id_df.index)
+    if "구번호" in product_id_df.columns:
+        old_no = product_id_df["구번호"].apply(_normalize_lookup_value)
+    else:
+        old_no = pd.Series([""] * len(product_id_df), index=product_id_df.index)
+
+    mask = mask & (new_no.eq(car_norm) | old_no.eq(car_norm))
+
+    matched = product_id_df[mask]
+    if matched.empty:
+        return ""
+    if "상품ID" not in matched.columns:
+        return ""
+    pid = matched["상품ID"].iloc[0]
+    return "" if pd.isna(pid) else str(pid)
+
+
+def _append_product_ledger_purchase_columns(df, detail_df, inventory_all_df=None, product_id_df=None):
+    """상품원장에 상품ID, 매입유형 컬럼 부여.
+
+    상품ID 매칭 우선순위:
+      1) 차량번호 == "지게차" → 적요 앞 12글자
+      2) 그 외 → product_id_df 에서 (사내매출 + 신/구번호 + 회계월) 매칭
+    """
     detail_lookup_df = detail_df
     if detail_lookup_df is not None and not detail_lookup_df.empty:
         detail_lookup_df = _strip_columns(detail_lookup_df)
@@ -881,7 +1046,8 @@ def _append_product_ledger_purchase_columns(df, detail_df, inventory_all_df=None
     inventory_detail_df = _build_detail_frame(inventory_all_df, "위탁등록일자")
     inventory_lookup = _build_detail_lookup(inventory_detail_df)
 
-    product_id_cache = {}
+    # 차량번호+회계월 단위 캐시 (반복 매칭 비용 절감)
+    lookup_cache = {}
     product_ids = []
     for _, row in df.iterrows():
         car_number = str(row["차량번호"]).strip() if pd.notna(row["차량번호"]) else ""
@@ -890,11 +1056,13 @@ def _append_product_ledger_purchase_columns(df, detail_df, inventory_all_df=None
             summary_text = str(row["적요"]) if pd.notna(row["적요"]) else ""
             product_id = summary_text[:12]
         else:
-            if car_number not in product_id_cache:
-                product_id_cache[car_number] = _lookup_product_id_by_car_number(
-                    car_number, detail_lookup, inventory_lookup
+            accounting_month = row.get("회계월", None)
+            cache_key = (car_number, accounting_month)
+            if cache_key not in lookup_cache:
+                lookup_cache[cache_key] = _lookup_product_id_from_product_id_df(
+                    car_number, accounting_month, product_id_df,
                 )
-            product_id = product_id_cache[car_number]
+            product_id = lookup_cache[cache_key]
         product_ids.append(product_id)
     df["상품ID"] = product_ids
 
@@ -913,6 +1081,7 @@ def preprocess_product_ledger(
     inventory_all_df=None,
     settlement_year=None,
     settlement_month=None,
+    product_id_df=None,
 ):
     """상품원장"""
     file.seek(0)
@@ -958,33 +1127,110 @@ def preprocess_product_ledger(
         columns_to_remove = df.loc[:, "잔액":"작성일자"].columns
         df.drop(columns=columns_to_remove, inplace=True)
 
-    return _append_product_ledger_purchase_columns(df, detail_df, inventory_all_df)
+    return _append_product_ledger_purchase_columns(
+        df, detail_df, inventory_all_df, product_id_df=product_id_df,
+    )
 
 
 # ----- 폐자원 -----
 
+def _build_chassis_month_value_lookup(df, value_column):
+    """detail/master df 에서 (차대번호, 회계월) → value_column lookup 생성."""
+    if df is None or df.empty:
+        return {}
+    if "차대번호" not in df.columns or "회계월" not in df.columns:
+        return {}
+    if value_column not in df.columns:
+        return {}
+
+    work = _strip_columns(df)
+    work["_차대번호_lookup"] = work["차대번호"].apply(_normalize_lookup_value)
+    work["_회계월_lookup"] = pd.to_numeric(work["회계월"], errors="coerce")
+    work = work[
+        work["_차대번호_lookup"].ne("")
+        & work["_회계월_lookup"].notna()
+    ].copy()
+    if work.empty:
+        return {}
+
+    lookup = {}
+    for _, row in work.iterrows():
+        key = (row["_차대번호_lookup"], int(row["_회계월_lookup"]))
+        value = row[value_column]
+        lookup.setdefault(key, "" if pd.isna(value) else str(value).strip())
+    return lookup
+
+
+def _load_latest_cost_summary_master():
+    """앱 폴더의 최신 cost_summary_*.xlsx 를 읽어 반환. 없거나 실패하면 빈 df."""
+    import glob
+    import os
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    paths = [
+        path for path in glob.glob(os.path.join(here, "cost_summary_*.xlsx"))
+        if os.path.exists(path) and os.path.getsize(path) > 0
+    ]
+    if not paths:
+        return pd.DataFrame()
+
+    paths.sort(key=lambda path: os.path.basename(path), reverse=True)
+    for path in paths:
+        try:
+            return _strip_columns(pd.read_excel(path, sheet_name="최종원가마스터"))
+        except Exception:
+            try:
+                return _strip_columns(pd.read_excel(path))
+            except Exception:
+                continue
+    return pd.DataFrame()
+
+
+def _find_prepaid_column(df):
+    """선매입 여부 컬럼명 후보 반환."""
+    if df is None or df.empty:
+        return None
+    for column in ("선매입여부", "선매입"):
+        if column in df.columns:
+            return column
+    return None
+
+
+def _lookup_chassis_month_value(lookup, chassis_value, month_value):
+    chassis_key = _normalize_lookup_value(chassis_value)
+    if not chassis_key:
+        return ""
+    if pd.isna(month_value):
+        return ""
+    try:
+        month_key = int(month_value)
+    except (TypeError, ValueError):
+        return ""
+    return lookup.get((chassis_key, month_key), "")
+
+
 def preprocess_waste_resource_file(file, product_ledger_df=None, detail_df=None):
     sheets = _load_excel_sheets(file)
-    product_id_by_car_number = _build_product_ledger_lookup(product_ledger_df)
-    product_id_by_chassis_number = _build_product_id_lookup_by_column(detail_df, "차대번호")
+    product_id_by_chassis_month = _build_chassis_month_value_lookup(detail_df, "상품ID")
+    product_id_by_chassis = _build_product_id_lookup_by_column(detail_df, "차대번호")
+
+    master_df = _load_latest_cost_summary_master()
+    prepaid_column = _find_prepaid_column(master_df)
+    prepaid_by_chassis_month = (
+        _build_chassis_month_value_lookup(master_df, prepaid_column)
+        if prepaid_column is not None else {}
+    )
+    if not prepaid_by_chassis_month:
+        detail_prepaid_column = _find_prepaid_column(detail_df)
+        prepaid_by_chassis_month = (
+            _build_chassis_month_value_lookup(detail_df, detail_prepaid_column)
+            if detail_prepaid_column is not None else {}
+        )
 
     processed_sheets = {}
     for sheet_name, df in sheets.items():
         if "구분" in df.columns:
             df = df[df["구분"].astype(str).str.strip().isin(["영수증", "계산서"])].copy()
-
-        # 차량번호 → 상품ID, 지게차는 차대번호로 대체
-        if "차량번호" in df.columns:
-            df["상품ID"] = df["차량번호"].apply(
-                lambda v: product_id_by_car_number.get(_normalize_lookup_value(v), "")
-            )
-            if "차대번호" in df.columns:
-                forklift_rows = df["차량번호"].astype(str).str.strip().eq("지게차")
-                df.loc[forklift_rows, "상품ID"] = df.loc[forklift_rows, "차대번호"].apply(
-                    lambda v: product_id_by_chassis_number.get(_normalize_lookup_value(v), "")
-                )
-        else:
-            df["상품ID"] = ""
 
         # 제외대상 (세액공제액 < 0)
         tax_credit_column = next(
@@ -996,10 +1242,69 @@ def preprocess_waste_resource_file(file, product_ledger_df=None, detail_df=None)
         else:
             df["제외대상"] = 0
 
-        df = _set_accounting_year_month(df, "매입일자")
+        # 매입일자 기준 매입년도/매입월 생성
+        if "매입일자" in df.columns:
+            parsed_purchase_date = pd.to_datetime(
+                df["매입일자"], format="mixed", errors="coerce"
+            )
+            df["매입년도"] = parsed_purchase_date.dt.year.astype("Int64")
+            df["매입월"] = parsed_purchase_date.dt.month.astype("Int64")
+        else:
+            df["매입년도"] = pd.NA
+            df["매입월"] = pd.NA
 
-        # 컬럼 순서: 첫 컬럼 다음에 [제외대상, 회계연도, 회계월] 삽입
-        ordered = [c for c in ("제외대상", "회계연도", "회계월") if c in df.columns]
+        purchase_month = pd.to_numeric(df["매입월"], errors="coerce")
+        previous_month = purchase_month - 1
+
+        # 비고: 매입월이 1월이면 빈 값 유지, 그 외에는 직전 회계월의 선매입여부 조회
+        df["비고"] = ""
+        if "차대번호" in df.columns and prepaid_by_chassis_month:
+            note_values = []
+            for chassis_value, month_value, prev_month_value in zip(
+                df["차대번호"], purchase_month, previous_month
+            ):
+                if pd.isna(month_value) or int(month_value) == 1:
+                    note_values.append("")
+                else:
+                    note_values.append(
+                        _lookup_chassis_month_value(
+                            prepaid_by_chassis_month, chassis_value, prev_month_value,
+                        )
+                    )
+            df["비고"] = note_values
+
+        # 회계연도/회계월: 선매입이면 회계월만 매입월-1, 아니면 매입월 그대로
+        df["회계연도"] = pd.to_numeric(df["매입년도"], errors="coerce").astype("Int64")
+        df["회계월"] = purchase_month.astype("Int64")
+        prepaid_rows = df["비고"].astype(str).str.strip().eq("선매입")
+        df.loc[prepaid_rows, "회계월"] = previous_month[prepaid_rows].astype("Int64")
+
+        # 상품ID: 차대번호가 없거나 제외대상이면 빈 값, 아니면 원가대상의 같은 회계월 차대번호에서 조회
+        df["상품ID"] = ""
+        if "차대번호" in df.columns:
+            excluded_rows = _is_flag_one(df["제외대상"])
+            product_ids = []
+            for chassis_value, accounting_month, excluded in zip(
+                df["차대번호"], df["회계월"], excluded_rows
+            ):
+                if excluded:
+                    product_ids.append("")
+                    continue
+                product_id = _lookup_chassis_month_value(
+                    product_id_by_chassis_month, chassis_value, accounting_month,
+                )
+                if not product_id and not product_id_by_chassis_month:
+                    product_id = product_id_by_chassis.get(
+                        _normalize_lookup_value(chassis_value), ""
+                    )
+                product_ids.append(product_id)
+            df["상품ID"] = product_ids
+
+        # 컬럼 순서: 첫 컬럼 다음에 [제외대상, 매입년도, 매입월, 비고, 회계연도, 회계월] 삽입
+        ordered = [
+            c for c in ("제외대상", "매입년도", "매입월", "비고", "회계연도", "회계월")
+            if c in df.columns
+        ]
         rest = [c for c in df.columns if c not in ordered]
         df = df[rest[:1] + ordered + rest[1:]]
 

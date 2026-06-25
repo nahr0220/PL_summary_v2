@@ -242,7 +242,7 @@ def process_opening_inventory_files(file_map, dfs):
 
 
 def render_base_upload(settlement_year, settlement_month):
-    st.subheader("1 원가대상")
+    st.subheader("원가대상")
 
     uploaded_files = st.file_uploader(
         "원가대상 업로드(기초재고/매입조회/전체상품조회/위탁수불부/복수비용_검사/복수비용_정비)", type=["xlsx"], accept_multiple_files=True,
@@ -399,14 +399,14 @@ def preprocess_purchase_cost_files(
 
             if "폐자원" in file.name:
                 if product_id_df.empty:
-                    st.warning("폐자원 파일의 상품ID를 가져오려면 1번 원가대상 파일을 먼저 업로드하세요.")
+                    st.warning("폐자원 파일의 상품ID를 가져오려면 원가대상 파일을 먼저 업로드하세요.")
                 file_sheets = preprocess_waste_resource_file(
                     file, product_ledger_lookup_df, product_id_df,
                 )
                 display_label = "폐자원공제"
             elif "페이백" in file.name:
                 if product_id_df.empty:
-                    st.warning("페이백 파일의 상품ID를 가져오려면 1번 기초 DB 파일도 함께 업로드하세요.")
+                    st.warning("페이백 파일의 상품ID를 가져오려면 원가대상 파일도 함께 업로드하세요.")
                 file_sheets = preprocess_payback_file(
                     file, product_id_df, settlement_year, settlement_month,
                 )
@@ -425,7 +425,7 @@ def preprocess_purchase_cost_files(
 
 
 def render_purchase_cost_upload(product_id_df, dfs, settlement_year, settlement_month):
-    st.markdown("##### 2-1 매입원가")
+    st.markdown("##### 매입원가")
 
     uploaded_cost_files = st.file_uploader(
         "매입원가 업로드(상품원장/재활용폐자원세액공제신고서/페이백)",
@@ -454,7 +454,7 @@ def render_purchase_cost_upload(product_id_df, dfs, settlement_year, settlement_
 # ============================================================
 
 def render_manufacturing_cost_upload(product_id_df, settlement_year, settlement_month):
-    st.markdown("##### 2-2 제조원가")
+    st.markdown("##### 제조원가")
 
     uploaded_files = st.file_uploader(
         "제조원가 업로드(재료비/노무비/부문별경비/직접경비)",
@@ -603,8 +603,8 @@ def _match_cost_driver_keyword(filename):
 
 
 def render_cost_driver_upload(settlement_year=None, settlement_month=None):
-    st.subheader("3 배부 기준자료")
-    st.markdown("##### 3-1 원가동인")
+    st.subheader("배부 기준자료")
+    st.markdown("##### 원가동인")
 
     uploaded_files = st.file_uploader(
         "원가동인 업로드 (AQI실적/TS/RTLS/RTCSM 또는 RTC·SM 각각)",
@@ -1267,7 +1267,7 @@ def render_combined_cost_driver(
 # ============================================================
 
 def render_verification_sheet_upload():
-    st.markdown("##### 3-2 기간별제조원가보고서")
+    st.markdown("##### 기간별제조원가보고서")
 
     uploaded_file = st.file_uploader(
         "기간별제조원가보고서 업로드",
@@ -1310,7 +1310,7 @@ def render_final_cost(
     cost_driver_dfs=None,
     combined_cost_driver_df=None,
 ):
-    st.subheader("4 차량별 원가현황")
+    st.subheader("차량별 원가현황")
 
     final_cost_df, _cached_diag = _cached_build_final_cost_df(
         product_id_df,
@@ -1326,11 +1326,11 @@ def render_final_cost(
     )
 
     if final_cost_df.empty:
-        st.info("1번 기초 DB 데이터를 업로드하면 최종 원가 초안이 생성됩니다.")
+        st.info("원가대상 데이터를 업로드하면 최종 원가 초안이 생성됩니다.")
         return final_cost_df
 
     if not purchase_cost_sheet_dfs:
-        st.info("2-1 매입원가의 상품원장 데이터를 업로드하면 금액 컬럼이 채워집니다.")
+        st.info("매입원가의 상품원장 데이터를 업로드하면 금액 컬럼이 채워집니다.")
 
     # 노무비/제조경비 배부 내역 (분자 / 분모 / 단가)
     # 캐시된 진단 우선 → attrs → 모듈 백업 순
@@ -1611,7 +1611,8 @@ def _compute_accounting_tables(master_df):
         return pd.Series([""] * len(df), index=df.index)
 
     auto_rows = [
-        ("기초재고", 0), ("당기입고", 0), ("정상입고", 1), ("타계정입고", 1), ("제조원가", 1),
+        ("기초재고", 0), ("제조원가", 1),
+        ("당기입고", 0), ("정상입고", 1), ("타계정입고", 1),
         ("당기출고", 0), ("정상출고", 1), ("자산출고", 1), ("기타출고", 1), ("기말재고", 0),
     ]
     auto_table = _build_accounting_table(auto_rows)
@@ -1623,8 +1624,8 @@ def _compute_accounting_tables(master_df):
 
     consign_rows = [
         ("기초재고", 0), ("제조원가", 1),
-        ("당기입고", 0), ("제조원가", 1),
-        ("당기출고", 0), ("매출원가", 1), ("위탁판매", 2), ("위탁매입", 2), ("위탁취소", 2),
+        ("당기입고", 0), ("정상입고", 1),
+        ("당기출고", 0), ("제조원가", 1), ("위탁판매", 2), ("위탁매입", 2), ("위탁취소", 2),
         ("기말재고", 0),
     ]
     consign_table = _build_accounting_table(consign_rows)
@@ -1798,7 +1799,10 @@ def _render_accounting_table(title, table, highlight_rows):
             style_df.iloc[r, c] = row_style + border
 
     styler = table.style.format("{:,.0f}").apply(lambda _: style_df, axis=None)
-    st.dataframe(styler, use_container_width=True)
+    row_height_px = 35
+    header_height_px = 65  # 멀티헤더 2줄 + 여유
+    total_height = header_height_px + row_height_px * len(table) + 10  # 하단 여유
+    st.dataframe(styler, use_container_width=True, height=total_height)
 
 
 def render_accounting_section(master_df=None):
@@ -1811,8 +1815,8 @@ def render_accounting_section(master_df=None):
 
     tables = _compute_accounting_tables(master_df)
     # 강조행: 소계/합계 (행 위치 기준)
-    # ① 자동차: 기초재고0, 당기입고1, 당기출고5, 기말재고9
-    _render_accounting_table("상품(자동차) 수불", tables["auto"], [0, 1, 5, 9])
+    # ① 자동차: 기초재고0, 당기입고2, 당기출고5, 기말재고9
+    _render_accounting_table("상품(자동차) 수불", tables["auto"], [0, 2, 5, 9])
     # ② 위탁: 기초재고0, 당기입고2, 당기출고4, 기말재고9
     _render_accounting_table("상품(위탁) 수불", tables["consign"], [0, 2, 4, 9])
     # # ③ 매출구분별: 위탁매출(3)만 강조
@@ -1972,7 +1976,7 @@ with tab2:
     dfs, product_id_df = render_base_upload(settlement_year, settlement_month)
 
     st.divider()
-    st.subheader("2 원가금액")
+    st.subheader("원가금액")
     purchase_cost_sheet_dfs = render_purchase_cost_upload(
         product_id_df, dfs, settlement_year, settlement_month,
     )

@@ -205,7 +205,7 @@ def render_settlement_selector():
 # 3. 기초 DB 업로드
 # ============================================================
 
-def process_base_file(fname, file, dfs, settlement_month):
+def process_base_file(fname, file, dfs, settlement_year, settlement_month):
     """파일명에 따라 기초 DB 전처리 라우팅."""
     if "매입조회" in fname:
         dfs["매입조회"] = preprocess_purchase_inquiry(file)
@@ -213,7 +213,7 @@ def process_base_file(fname, file, dfs, settlement_month):
         dfs["전체상품조회"] = preprocess_product_master(file)
     elif "위탁수불부" in fname:
         ledger_all, ledger_opening, ledger_inbound = preprocess_consignment_ledger(
-            file, settlement_month
+            file, settlement_year, settlement_month
         )
         dfs["위탁수불부"] = ledger_all
         dfs["위탁수불부_전체"] = ledger_all
@@ -256,7 +256,7 @@ def render_base_upload(settlement_year, settlement_month):
 
         for fname, file in file_map.items():
             try:
-                process_base_file(fname, file, dfs, settlement_month)
+                process_base_file(fname, file, dfs, settlement_year, settlement_month)
             except Exception as exc:
                 st.error(f"{fname} 처리 중 오류: {exc}")
 

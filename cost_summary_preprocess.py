@@ -517,20 +517,26 @@ def preprocess_product_master(file):
     return _ensure_product_id(df)
 
 
-def preprocess_consignment_ledger(file, settlement_month):
-    """위탁수불부 → (전체, 기초제외==1, 입고제외==1)"""
+def preprocess_consignment_ledger(file, settlement_year, settlement_month):
+    """위탁수불부 → (결산연월 전체, 기초==1, 입고==1)."""
     df = _ensure_product_id(_strip_columns(pd.read_excel(file)))
 
-    opening_column = f"{settlement_month}월기초_제외"
-    inbound_column = f"{settlement_month}월입고_제외"
-    if opening_column not in df.columns:
-        raise KeyError(f"위탁수불부 파일에 '{opening_column}' 컬럼이 없습니다.")
-    if inbound_column not in df.columns:
-        raise KeyError(f"위탁수불부 파일에 '{inbound_column}' 컬럼이 없습니다.")
+    required_columns = ["회계연도", "회계월", "기초", "입고"]
+    missing_columns = [column for column in required_columns if column not in df.columns]
+    if missing_columns:
+        raise KeyError(
+            "위탁수불부 파일에 다음 컬럼이 없습니다: "
+            + ", ".join(f"'{column}'" for column in missing_columns)
+        )
 
-    opening_df = df[_is_flag_one(df[opening_column])].copy()
-    inbound_df = df[_is_flag_one(df[inbound_column])].copy()
-    return df, opening_df, inbound_df
+    year = pd.to_numeric(df["회계연도"], errors="coerce")
+    month = pd.to_numeric(df["회계월"], errors="coerce")
+    period_mask = year.eq(int(settlement_year)) & month.eq(int(settlement_month))
+    period_df = df[period_mask].copy()
+
+    opening_df = period_df[_is_flag_one(period_df["기초"])].copy()
+    inbound_df = period_df[_is_flag_one(period_df["입고"])].copy()
+    return period_df, opening_df, inbound_df
 
 
 def preprocess_sales(file, exclude_partner=None):

@@ -48,6 +48,14 @@ def _build_sales_division_id(sales_type_series, product_id_series):
     return st_clean + "_" + id_clean
 
 
+@st.cache_data(show_spinner=False)
+def _read_excel_cached(path, mtime, sheet_name=None):
+    """파일 수정시간을 캐시 키에 포함해 같은 엑셀 반복 읽기를 줄인다."""
+    if sheet_name is None:
+        return pd.read_excel(path)
+    return pd.read_excel(path, sheet_name=sheet_name)
+
+
 def load_final_cost_master():
     """cost_summary_YYYYMMDD.xlsx 중 가장 최근 파일 불러오기.
 
@@ -80,11 +88,12 @@ def load_final_cost_master():
     matched = sorted(set(matched), key=sort_key, reverse=True)
     path = matched[0]
 
+    mtime = os.path.getmtime(path)
     try:
-        return pd.read_excel(path, sheet_name="최종원가마스터")
+        return _read_excel_cached(path, mtime, "최종원가마스터")
     except Exception:
         try:
-            return pd.read_excel(path)
+            return _read_excel_cached(path, mtime, None)
         except Exception:
             return None
 
@@ -96,6 +105,15 @@ def merge_cost_into_master(master_df, final_df):
     각 매칭 그룹의 COST_SUM_COLUMNS 합계를 master_df 각 행에 부여.
     """
     result = master_df.copy()
+
+    def _to_int_key(series, index=None):
+        if series is None:
+            return pd.Series(pd.array([pd.NA] * len(index), dtype="Int64"), index=index)
+        numeric = pd.to_numeric(series, errors="coerce")
+        truncated = numeric.copy()
+        mask = numeric.notna()
+        truncated.loc[mask] = np.trunc(numeric.loc[mask].astype(float))
+        return truncated.astype("Int64")
 
     fc_sales = _find_column(final_df, ["매출구분"])
     fc_id = _find_column(final_df, ["상품ID", "상품아이디"])
@@ -111,24 +129,16 @@ def merge_cost_into_master(master_df, final_df):
 
     fc = final_df.copy()
     fc["_구분자"] = _build_sales_division_id(fc[fc_sales], fc[fc_id])
-    fc["_연"] = pd.to_numeric(fc[fc_year], errors="coerce")
-    fc["_월"] = pd.to_numeric(fc[fc_month], errors="coerce")
+    fc["_연"] = _to_int_key(fc[fc_year])
+    fc["_월"] = _to_int_key(fc[fc_month])
+    fc_valid = fc[fc["_연"].notna() & fc["_월"].notna()].copy()
 
     available_cols = [c for c in COST_SUM_COLUMNS if c in fc.columns]
     for c in available_cols:
-        fc[c] = pd.to_numeric(fc[c], errors="coerce").fillna(0)
-
-    grouped = (
-        fc.groupby(["_구분자", "_연", "_월"], dropna=False)[available_cols].sum()
-        if available_cols else None
-    )
+        fc_valid[c] = pd.to_numeric(fc_valid[c], errors="coerce").fillna(0)
 
     # 텍스트 컬럼: 그룹 대표값(첫 값)으로 가져옴
     available_text_cols = [c for c in COST_TEXT_COLUMNS if c in fc.columns]
-    grouped_text = (
-        fc.groupby(["_구분자", "_연", "_월"], dropna=False)[available_text_cols].first()
-        if available_text_cols else None
-    )
 
     md_year = _find_column(result, ["판매년도", "판매연도", "매출년도", "매출연도"])
     md_month = _find_column(result, ["판매월", "매출월", "월"])
@@ -146,73 +156,89 @@ def merge_cost_into_master(master_df, final_df):
         else:
             master_key = pd.Series([""] * len(result), index=result.index)
 
-    master_year = pd.to_numeric(result[md_year], errors="coerce") if md_year else pd.Series([pd.NA] * len(result), index=result.index)
-    master_month = pd.to_numeric(result[md_month], errors="coerce") if md_month else pd.Series([pd.NA] * len(result), index=result.index)
+    master_year = _to_int_key(result[md_year], result.index) if md_year else _to_int_key(None, result.index)
+    master_month = _to_int_key(result[md_month], result.index) if md_month else _to_int_key(None, result.index)
+
+    key_columns = ["_구분자", "_연", "_월"]
+    lookup_keys = pd.DataFrame({
+        "_row_pos": np.arange(len(result)),
+        "_구분자": master_key.to_numpy(),
+        "_연": master_year.to_numpy(),
+        "_월": master_month.to_numpy(),
+    })
+
+    if available_cols and not fc_valid.empty:
+        grouped = (
+            fc_valid.groupby(key_columns, dropna=False)[available_cols]
+            .sum()
+            .reset_index()
+        )
+        cost_values = lookup_keys.merge(grouped, on=key_columns, how="left", sort=False)
+    else:
+        cost_values = lookup_keys
 
     for col in COST_SUM_COLUMNS:
-        values = []
-        for key, yr, mo in zip(master_key, master_year, master_month):
-            if grouped is None or col not in available_cols:
-                values.append(0)
-                continue
-            yr_int = int(yr) if pd.notna(yr) else None
-            mo_int = int(mo) if pd.notna(mo) else None
-            try:
-                v = grouped.loc[(key, yr_int, mo_int), col]
-                values.append(float(v))
-            except (KeyError, TypeError):
-                values.append(0)
-        result[col] = values
+        if col in available_cols and col in cost_values.columns:
+            result[col] = (
+                pd.to_numeric(cost_values[col], errors="coerce")
+                .fillna(0)
+                .to_numpy()
+            )
+        else:
+            result[col] = 0
 
     # 텍스트 컬럼 (분류): 그룹 대표값 가져오기 (없으면 "")
+    if available_text_cols and not fc_valid.empty:
+        grouped_text = (
+            fc_valid.groupby(key_columns, dropna=False)[available_text_cols]
+            .first()
+            .reset_index()
+        )
+        text_values = lookup_keys.merge(grouped_text, on=key_columns, how="left", sort=False)
+    else:
+        text_values = lookup_keys
+
     for col in COST_TEXT_COLUMNS:
-        values = []
-        for key, yr, mo in zip(master_key, master_year, master_month):
-            if grouped_text is None or col not in available_text_cols:
-                values.append("")
-                continue
-            yr_int = int(yr) if pd.notna(yr) else None
-            mo_int = int(mo) if pd.notna(mo) else None
-            try:
-                v = grouped_text.loc[(key, yr_int, mo_int), col]
-                values.append("" if pd.isna(v) else str(v))
-            except (KeyError, TypeError):
-                values.append("")
-        result[col] = values
+        if col in available_text_cols and col in text_values.columns:
+            result[col] = text_values[col].where(text_values[col].notna(), "").astype(str).to_numpy()
+        else:
+            result[col] = ""
 
     # 원장매입일: (상품ID, 회계연도, 회계월) 매칭되는 cost_summary 의 매입일자
     #   상품/위탁 == "위탁" 이면 빈값
     fc_purchase_date = _find_column(final_df, ["매입일자", "매입일", "원장매입일"])
-    purchase_date_map = {}
-    if fc_purchase_date is not None:
-        tmp = final_df.copy()
-        tmp["_id"] = tmp[fc_id].astype(str).str.strip()
-        tmp["_연"] = pd.to_numeric(tmp[fc_year], errors="coerce")
-        tmp["_월"] = pd.to_numeric(tmp[fc_month], errors="coerce")
-        for _, row in tmp.iterrows():
-            yr = int(row["_연"]) if pd.notna(row["_연"]) else None
-            mo = int(row["_월"]) if pd.notna(row["_월"]) else None
-            purchase_date_map[(row["_id"], yr, mo)] = row[fc_purchase_date]
-
     md_id2 = _find_column(result, ["상품ID", "상품아이디"])
     is_consign = (
         result["상품/위탁"].astype(str).str.strip().eq("위탁")
         if "상품/위탁" in result.columns
         else pd.Series([False] * len(result), index=result.index)
     )
-    ledger_dates = []
-    for i in range(len(result)):
-        if bool(is_consign.iloc[i]):
-            ledger_dates.append("")
-            continue
-        pid = str(result[md_id2].iloc[i]).strip() if md_id2 else ""
-        yr = master_year.iloc[i]
-        mo = master_month.iloc[i]
-        yr_int = int(yr) if pd.notna(yr) else None
-        mo_int = int(mo) if pd.notna(mo) else None
-        val = purchase_date_map.get((pid, yr_int, mo_int), "")
-        ledger_dates.append("" if (val is None or (not isinstance(val, str) and pd.isna(val))) else val)
-    result["원장매입일"] = ledger_dates
+    if fc_purchase_date is not None and md_id2 is not None:
+        tmp = final_df[[fc_id, fc_year, fc_month, fc_purchase_date]].copy()
+        tmp["_id"] = tmp[fc_id].astype(str).str.strip()
+        tmp["_연"] = _to_int_key(tmp[fc_year])
+        tmp["_월"] = _to_int_key(tmp[fc_month])
+        tmp = tmp[tmp["_연"].notna() & tmp["_월"].notna()].copy()
+        tmp = tmp.drop_duplicates(subset=["_id", "_연", "_월"], keep="last")
+
+        date_keys = pd.DataFrame({
+            "_id": result[md_id2].astype(str).str.strip().to_numpy(),
+            "_연": master_year.to_numpy(),
+            "_월": master_month.to_numpy(),
+        })
+        date_values = date_keys.merge(
+            tmp[["_id", "_연", "_월", fc_purchase_date]],
+            on=["_id", "_연", "_월"],
+            how="left",
+            sort=False,
+        )
+        ledger_dates = date_values[fc_purchase_date].astype("object")
+        ledger_dates = ledger_dates.where(ledger_dates.notna(), "")
+        ledger_dates = ledger_dates.to_numpy(dtype=object)
+        ledger_dates[is_consign.to_numpy()] = ""
+        result["원장매입일"] = ledger_dates
+    else:
+        result["원장매입일"] = ""
 
     return result
 
@@ -224,7 +250,7 @@ with tab1:
     exclude_cols = ['번호', '매입유형1', '매입유형2', '매입유형3', '매입처', '매입지점', '매입사원', '도/소매구분']
 
     if os.path.exists(master_file) and os.path.getsize(master_file) > 0:
-        master_df = pd.read_excel(master_file)
+        master_df = _read_excel_cached(master_file, os.path.getmtime(master_file), None)
         master_df = master_df.drop(columns=exclude_cols, errors='ignore')
         master_df['구분자'] = np.where(
             master_df['상품/위탁'] == '상품',
@@ -278,25 +304,22 @@ with tab1:
                     if "분류1" in merged_df.columns
                     else pd.Series([False] * len(merged_df), index=merged_df.index)
                 )
-                재고일수_vals = []
-                for i in range(len(merged_df)):
-                    if bool(c1_consign.iloc[i]):
-                        재고일수_vals.append("")
-                    else:
-                        d = diff_days.iloc[i]
-                        재고일수_vals.append("" if pd.isna(d) else int(d))
-                merged_df["재고일수"] = pd.Series(재고일수_vals, index=merged_df.index)
+                valid_days = ~c1_consign & diff_days.notna()
+                merged_df["재고일수"] = ""
+                merged_df.loc[valid_days, "재고일수"] = (
+                    diff_days.loc[valid_days].astype(int).astype("object")
+                )
 
                 # 재고일수_수정 = 재고일수 <= 0 이면 1, 아니면 그대로 (빈값은 빈값)
-                수정_vals = []
-                for v in merged_df["재고일수"]:
-                    if v == "" or pd.isna(v):
-                        수정_vals.append("")
-                    elif v <= 0:
-                        수정_vals.append(1)
-                    else:
-                        수정_vals.append(int(v))
-                merged_df["재고일수_수정"] = pd.Series(수정_vals, index=merged_df.index)
+                numeric_days = pd.to_numeric(merged_df["재고일수"], errors="coerce")
+                valid_adjusted = numeric_days.notna()
+                merged_df["재고일수_수정"] = ""
+                merged_df.loc[valid_adjusted, "재고일수_수정"] = (
+                    numeric_days.loc[valid_adjusted]
+                    .where(numeric_days.loc[valid_adjusted].gt(0), 1)
+                    .astype(int)
+                    .astype("object")
+                )
 
             # ===== 월별 판매 대수 / 월별 매출 (merged_df 기반) =====
             if '소/도매' in merged_df.columns and '판매월' in merged_df.columns:
@@ -318,6 +341,28 @@ with tab1:
                     )
 
                 if not merged_df.empty:
+                    if hasattr(st, "toggle"):
+                        show_per_unit_only = st.toggle(
+                            "대당으로 보기",
+                            value=False,
+                            key="summary_show_per_unit_only",
+                        )
+                    else:
+                        show_per_unit_only = st.checkbox(
+                            "대당으로 보기",
+                            value=False,
+                            key="summary_show_per_unit_only",
+                        )
+
+                    def _amount_caption(label):
+                        if show_per_unit_only:
+                            return f"(단위: {label} 원/대)"
+                        return "(단위: 원)"
+
+                    def _summary_table_height(df, row_height=35, header_height=38):
+                        """Set monthly summary table height to show all rows."""
+                        return int(header_height + row_height * len(df) + 4)
+
                     # 1. 월별 판매 대수 (상품/위탁 × 소/도매)
                     s_p = merged_df.pivot_table(
                         index=['상품/위탁', '소/도매'], columns='판매월',
@@ -341,7 +386,11 @@ with tab1:
                         """,
                         unsafe_allow_html=True,
                     )
-                    st.dataframe(style_dataframe(s_p), use_container_width=True)
+                    st.dataframe(
+                        style_dataframe(s_p),
+                        use_container_width=True,
+                        height=_summary_table_height(s_p),
+                    )
 
                     # 2. 월별 매출 (상품매출 / 용역매출 × 소/도매)
                     if all(c in merged_df.columns for c in ['상품매출', '용역매출']):
@@ -380,13 +429,13 @@ with tab1:
                         # per_unit 의 인덱스가 매출 표와 같으니, '전체' 행도 같은 라벨로 추가
                         per_unit.loc[('전체', '총 매출액'), :] = total_row.values
 
-                        # 매출 + (대당매출) 한 셀에 한 줄로 합치기: "3,300 (1,650)"
+                        # 표시 방식: 기본은 금액만, 토글 ON 은 대당 금액만.
                         def _fmt_cell(amount, per):
                             amount_int = int(amount) if pd.notna(amount) else 0
                             per_int = int(per) if pd.notna(per) else 0
-                            top = '-' if amount_int == 0 else f"{amount_int:,}"
-                            bot = '-' if per_int == 0 else f"({per_int:,})"
-                            return f"{top} {bot}"
+                            if show_per_unit_only:
+                                return '-' if per_int == 0 else f"{per_int:,}"
+                            return '-' if amount_int == 0 else f"{amount_int:,}"
 
                         combined = pd.DataFrame(index=r_p.index, columns=r_p.columns, dtype=object)
                         for idx in r_p.index:
@@ -413,15 +462,19 @@ with tab1:
                             )
 
                         st.markdown(
-                            """
+                            f"""
                             <div style="display:flex; justify-content:space-between; align-items:flex-end;">
                                 <div style="font-size:20px; font-weight:bold;">월별 매출</div>
-                                <div style="font-size:12px; color:gray;">(단위: 원, 괄호: 대당 매출 원/대)</div>
+                                <div style="font-size:12px; color:gray;">{_amount_caption("대당 매출")}</div>
                             </div>
                             """,
                             unsafe_allow_html=True,
                         )
-                        st.dataframe(_style_combined(combined), use_container_width=True)
+                        st.dataframe(
+                            _style_combined(combined),
+                            use_container_width=True,
+                            height=_summary_table_height(combined),
+                        )
 
                         # 임시 컬럼 정리
                         merged_df.drop(columns=['_매출합'], inplace=True)
@@ -493,14 +546,14 @@ with tab1:
                         # 합계 행 분모 = 상품 전체 + 위탁 전체
                         qty_map.append(_qty('상품') + _qty('위탁'))
 
-                        # 한 줄 포맷: "금액 (대당)"
+                        # 표시 방식: 기본은 금액만, 토글 ON 은 대당 금액만.
                         def _fmt_one_line(amount, qty):
                             a = int(round(float(amount))) if pd.notna(amount) else 0
                             q = float(qty) if pd.notna(qty) else 0
-                            top = '-' if a == 0 else f"{a:,}"
                             per = int(round(a / q)) if q else 0
-                            bot = '-' if per == 0 else f"({per:,})"
-                            return f"{top} {bot}"
+                            if show_per_unit_only:
+                                return '-' if per == 0 else f"{per:,}"
+                            return '-' if a == 0 else f"{a:,}"
 
                         # 표 만들기 (중복 인덱스 라벨 → zero-width space 로 고유화, Styler 호환)
                         raw_tuples = [(r[0], r[1], r[2]) for r in rows]
@@ -546,15 +599,19 @@ with tab1:
                         }).apply(lambda _: style_df, axis=None)
 
                         st.markdown(
-                            """
+                            f"""
                             <div style="display:flex; justify-content:space-between; align-items:flex-end;">
                                 <div style="font-size:20px; font-weight:bold;">월별 매출원가</div>
-                                <div style="font-size:12px; color:gray;">(단위: 원, 괄호: 대당 원/대)</div>
+                                <div style="font-size:12px; color:gray;">{_amount_caption("대당")}</div>
                             </div>
                             """,
                             unsafe_allow_html=True,
                         )
-                        st.dataframe(cost_styler, use_container_width=True)
+                        st.dataframe(
+                            cost_styler,
+                            use_container_width=True,
+                            height=_summary_table_height(cost_df),
+                        )
 
                         # ===== 월별 매출총이익 = 월별 매출 - 월별 매출원가 =====
                         # 각 (상품/위탁, 소/도매) 별로 매출 - 매출원가 직접 계산
@@ -631,15 +688,19 @@ with tab1:
                         }).apply(lambda _: gp_style_df, axis=None)
 
                         st.markdown(
-                            """
+                            f"""
                             <div style="display:flex; justify-content:space-between; align-items:flex-end;">
                                 <div style="font-size:20px; font-weight:bold;">월별 매출총이익</div>
-                                <div style="font-size:12px; color:gray;">(단위: 원, 괄호: 대당 매출총이익 원/대)</div>
+                                <div style="font-size:12px; color:gray;">{_amount_caption("대당 매출총이익")}</div>
                             </div>
                             """,
                             unsafe_allow_html=True,
                         )
-                        st.dataframe(gp_styler, use_container_width=True)
+                        st.dataframe(
+                            gp_styler,
+                            use_container_width=True,
+                            height=_summary_table_height(gp_df),
+                        )
 
                         # ===== 월별 매출총이익률 = 매출총이익 / 매출 × 100 (%) =====
                         # 매출총이익 표(gp_rows)의 값들을 재사용해서 매출(rev) 로 나눔
@@ -717,7 +778,11 @@ with tab1:
                             """,
                             unsafe_allow_html=True,
                         )
-                        st.dataframe(gpr_styler, use_container_width=True)
+                        st.dataframe(
+                            gpr_styler,
+                            use_container_width=True,
+                            height=_summary_table_height(gpr_df),
+                        )
 
                 st.divider()
 
@@ -790,3 +855,4 @@ with tab1:
             st.dataframe(filtered_df)
     else:
         st.warning("매출, 원가파일이 비어 있습니다.")
+

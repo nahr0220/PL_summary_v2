@@ -1966,44 +1966,33 @@ def _build_inventory_df_from_master(settlement_year, settlement_month):
 
 
 def _build_consignment_outbound_counts(consignment_ledger_df, settlement_month):
-    """위탁수불부에서 상품ID별 출고==1 개수 반환.
+    """위탁수불부에서 상품ID별 출고 개수 반환.
 
-    출고 컬럼 후보: '{월}월출고', '{월}월출고_제외', '출고', '출고여부'
+    출고 여부는 출고상태 컬럼값이 위탁판매/위탁매입/위탁취소 중 하나인지로 판단한다.
     반환: {상품ID: 개수}
     """
     if consignment_ledger_df is None or consignment_ledger_df.empty:
         return {}
 
     df = _strip_columns(consignment_ledger_df).copy()
-    if "상품ID" not in df.columns:
-        return {}
-
-    # 출고 컬럼 후보 ('출고여부' 우선)
-    outbound_candidates = ["출고여부", "출고상태", "출고", "출고_제외"]
-    if settlement_month is not None:
-        outbound_candidates += [
-            f"{int(settlement_month)}월출고",
-            f"{int(settlement_month)}월출고_제외",
-            f"{int(settlement_month)}월_출고",
-        ]
-
-    outbound_column = next(
-        (c for c in outbound_candidates if c in df.columns), None
-    )
-    if outbound_column is None:
+    if "상품ID" not in df.columns or "출고상태" not in df.columns:
         return {}
 
     df["상품ID"] = df["상품ID"].astype(str).str.strip()
-    matched = df[_is_flag_one(df[outbound_column]) & df["상품ID"].ne("")]
+    outbound_values = {"위탁판매", "위탁매입", "위탁취소"}
+    matched = df[
+        df["출고상태"].astype(str).str.strip().isin(outbound_values)
+        & df["상품ID"].ne("")
+    ]
     if matched.empty:
         return {}
 
     return matched["상품ID"].value_counts().to_dict()
 
-
 def _build_consignment_outbound_status_map(consignment_ledger_df):
-    """위탁수불부에서 출고여부==1 인 행의 상품ID별 '출고상태' 값 반환.
+    """위탁수불부에서 출고상태값(위탁판매/위탁매입/위탁취소)이 있는 행의 상품ID별 출고상태 값 반환.
 
+    출고여부 컬럼 없이 출고상태 컬럼 값 자체로 출고 여부를 판단한다.
     반환: {상품ID: 출고상태값}. 같은 상품ID 가 여러 건이면 마지막 값.
     """
     if consignment_ledger_df is None or consignment_ledger_df.empty:
@@ -2013,13 +2002,12 @@ def _build_consignment_outbound_status_map(consignment_ledger_df):
     if "상품ID" not in df.columns or "출고상태" not in df.columns:
         return {}
 
-    flag_column = "출고여부" if "출고여부" in df.columns else None
     df["상품ID"] = df["상품ID"].astype(str).str.strip()
-
-    if flag_column is not None:
-        matched = df[_is_flag_one(df[flag_column]) & df["상품ID"].ne("")]
-    else:
-        matched = df[df["상품ID"].ne("")]
+    outbound_values = {"위탁판매", "위탁매입", "위탁취소"}
+    matched = df[
+        df["출고상태"].astype(str).str.strip().isin(outbound_values)
+        & df["상품ID"].ne("")
+    ]
     if matched.empty:
         return {}
 
@@ -2027,7 +2015,6 @@ def _build_consignment_outbound_status_map(consignment_ledger_df):
     for _, row in matched.iterrows():
         result[row["상품ID"]] = row["출고상태"]
     return result
-
 
 def _append_inventory_quantity_amount_columns(
     final_df, inventory_df, purchase_cost_sheet_dfs, settlement_month,
@@ -2207,14 +2194,25 @@ def _append_inventory_quantity_amount_columns(
         - normal_out_qty - asset_qty - etc_qty
     )
 
-    # ----- 기말_금액 = 당사차량만 (입고금액합 - 정상출고 - 자산출고 - 기타출고) -----
+    # ----- 기말_금액 = 당사차량: 입고금액합 - 정상출고 - 자산출고 - 기타출고
+    #                  위탁매출: 기초_금액 + 입고금액합 - 정상출고_금액 -----
     ending_amount = (
         inbound_amount_sum
         - normal_out_amount
         - final_df["자산출고_금액"]
         - final_df["기타출고_금액"]
     )
+    consignment_mask = sales_type_series.eq("위탁매출")
+    base_amount = pd.to_numeric(final_df["기초_금액"], errors="coerce").fillna(0)
+    consignment_ending_amount = (
+        base_amount
+        + inbound_amount_sum
+        - normal_out_amount
+    )
     final_df["기말_금액"] = ending_amount.where(own_vehicle_mask, 0)
+    final_df["기말_금액"] = final_df["기말_금액"].where(
+        ~consignment_mask, consignment_ending_amount
+    )
 
     # 위탁출고구분: 위탁수불부 출고여부==1 인 행의 출고상태 값 (상품ID 매칭)
     status_map = _build_consignment_outbound_status_map(consignment_ledger_df)

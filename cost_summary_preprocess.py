@@ -534,6 +534,16 @@ def preprocess_consignment_ledger(file, settlement_year, settlement_month):
     period_mask = year.eq(int(settlement_year)) & month.eq(int(settlement_month))
     period_df = df[period_mask].copy()
 
+    # 출고상태 컬럼 생성: 판매==1 → 위탁판매, 매입==1 → 위탁매입, 취소==1 → 위탁취소
+    outbound_conditions = []
+    outbound_choices = []
+    for col, label in [("판매", "위탁판매"), ("매입", "위탁매입"), ("취소", "위탁취소")]:
+        if col in period_df.columns:
+            outbound_conditions.append(_is_flag_one(period_df[col]))
+            outbound_choices.append(label)
+    if outbound_conditions:
+        period_df["출고상태"] = np.select(outbound_conditions, outbound_choices, default="")
+
     opening_df = period_df[_is_flag_one(period_df["기초"])].copy()
     inbound_df = period_df[_is_flag_one(period_df["입고"])].copy()
     return period_df, opening_df, inbound_df

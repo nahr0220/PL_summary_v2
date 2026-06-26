@@ -1649,14 +1649,14 @@ def _compute_accounting_tables(master_df):
         transfer_in_q = s(in_house, "타처입고_수량"); transfer_in_a = s(in_house, "타처입고_금액")
         mfg_a = s(in_house, "제조원가_당월")
         in_q = normal_in_q + transfer_in_q
-        in_a = normal_in_a + transfer_in_a + mfg_a
+        in_a = normal_in_a + transfer_in_a
         normal_out_q = s(in_house, "정상출고_수량"); normal_out_a = s(in_house, "정상출고_금액")
         asset_out_q = s(in_house, "자산출고_수량"); asset_out_a = s(in_house, "자산출고_금액")
         etc_out_q = s(in_house, "기타출고_수량"); etc_out_a = s(in_house, "기타출고_금액")
         out_q = normal_out_q + asset_out_q + etc_out_q
         out_a = normal_out_a + asset_out_a + etc_out_a
         end_q = base_q + in_q - out_q
-        end_a = base_a + in_a - out_a
+        end_a = base_a + in_a + mfg_a - out_a
 
         auto_values = {
             "기초재고": (base_q, base_a),
@@ -1711,7 +1711,8 @@ def _compute_accounting_tables(master_df):
 
         # ③ 위탁 수불 (위탁매출)
         c_base_q = s(consign_m, "기초_수량")
-        c_base_a = float(col("제조원가")[consign_m & col("기초_수량").gt(0)].sum())
+        c_base_a = float(col("기초_금액")[consign_m & col("기초_수량").eq(1)].sum())
+        c_base_mfg_a = float(col("제조원가")[consign_m & col("기초_수량").gt(0)].sum())
         c_in_q = s(consign_m, "정상입고_수량")
         c_in_a = float(col("제조원가")[consign_m & col("정상입고_수량").gt(0)].sum())
         c_out_q = s(consign_m, "정상출고_수량")
@@ -1728,11 +1729,11 @@ def _compute_accounting_tables(master_df):
         buy_q, buy_a = consign_status("위탁매입")
         cancel_q, cancel_a = consign_status("위탁취소")
         c_end_q = c_base_q + c_in_q - c_out_q
-        c_end_a = c_base_a + c_in_a - c_out_a
+        c_end_a = float(col("기말_금액")[consign_m & col("기말_수량").eq(1)].sum())
 
         consign_values_ordered = [
             (c_base_q, c_base_a),
-            (c_base_q, c_base_a),
+            (c_base_q, c_base_mfg_a),
             (c_in_q, c_in_a),
             (c_in_q, c_in_a),
             (c_out_q, c_out_a),

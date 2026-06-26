@@ -248,7 +248,11 @@ def _excel_round(value, digits=0):
 
     try:
         digits = int(digits)
-        number = Decimal(str(float(value)))
+        number = Decimal(str(value))
+        # 계산 중 123.5 가 123.49999999999999 처럼 들어오는 부동소수점
+        # 경계 오차만 보정해 Excel ROUND 결과와 맞춘다.
+        epsilon = Decimal("1e-12").scaleb(-digits)
+        number = number + epsilon if number >= 0 else number - epsilon
         quantizer = Decimal("1").scaleb(-digits)
         rounded = number.quantize(quantizer, rounding=ROUND_HALF_UP)
     except Exception:

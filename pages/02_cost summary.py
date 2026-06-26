@@ -11,11 +11,18 @@
 """
 
 import re
+import importlib
 
 import numpy as np
 import pandas as pd
 import streamlit as st
 from datetime import datetime
+
+import cost_summary_preprocess as _cost_summary_preprocess
+import cost_summary_builder as _cost_summary_builder
+
+_cost_summary_preprocess = importlib.reload(_cost_summary_preprocess)
+_cost_summary_builder = importlib.reload(_cost_summary_builder)
 
 from cost_summary_preprocess import (
     BASE_DF_KEYS,
@@ -43,6 +50,9 @@ from cost_summary_preprocess import (
 from cost_summary_builder import build_final_cost_df, get_last_manufacturing_expense_diagnostics
 
 
+COST_SUMMARY_CALC_VERSION = "rounding-half-up-epsilon-v1"
+
+
 def _build_input_fingerprint(*dfs_and_values):
     """빌드 입력의 지문 생성 (shape + 숫자합계 + 스칼라값).
 
@@ -59,7 +69,7 @@ def _build_input_fingerprint(*dfs_and_values):
             numeric_sum = 0.0
         return (df.shape, tuple(map(str, df.columns)), _excel_round(numeric_sum, 2))
 
-    parts = []
+    parts = [("calc_version", COST_SUMMARY_CALC_VERSION)]
     for item in dfs_and_values:
         if isinstance(item, pd.DataFrame):
             parts.append(("df", df_signature(item)))

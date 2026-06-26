@@ -987,9 +987,9 @@ def _append_manufacturing_expense_columns(
             amount_by_product_id.get((pid, sales_type), 0)
             for pid, sales_type in zip(product_id_series, sales_type_series)
         ]
-        final_df["제조경비_직접"] = pd.to_numeric(
-            pd.Series(values, index=final_df.index), errors="coerce",
-        ).fillna(0).astype(int)
+        final_df["제조경비_직접"] = _excel_round_series(
+            pd.Series(values, index=final_df.index)
+        ).fillna(0)
 
         # 검사매출 행은 0
         if "매출구분" in final_df.columns:

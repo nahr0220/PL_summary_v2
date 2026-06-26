@@ -902,7 +902,16 @@ def _allocate_amount_by_rounded_unit_rate(
 
     unit_rate = _round_half_up(total_amount / weights_sum)
     # 각 행 = 가중치 × 정수단가, 행별 결과도 정수로 반올림 (0.5 올림)
-    allocations = (weights * unit_rate).apply(_round_half_up)
+    # float64 곱셈은 5.10×25=127.4999... 같은 오차가 생기므로
+    # Decimal(str(weight)) × Decimal(str(unit_rate)) 로 십진수 정밀 계산 후 반올림
+    from decimal import Decimal, ROUND_HALF_UP as _ROUND_HALF_UP
+    _ur_dec = Decimal(str(unit_rate))
+    def _decimal_mul_round(w):
+        if w != w:  # NaN
+            return 0
+        result = Decimal(str(w)) * _ur_dec
+        return int(result.quantize(Decimal("1"), rounding=_ROUND_HALF_UP))
+    allocations = weights.apply(_decimal_mul_round)
     # 대상 컬럼이 int dtype 이면 float 값 대입 시 에러(pandas 2.x) → float 로 캐스팅
     final_df[target_column] = pd.to_numeric(
         final_df[target_column], errors="coerce"

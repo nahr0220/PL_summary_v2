@@ -248,11 +248,13 @@ def _excel_round(value, digits=0):
 
     try:
         digits = int(digits)
+        # str() 변환으로 부동소수점을 사람이 읽는 십진수 표현으로 바꾼 뒤
+        # Decimal로 정확하게 처리한다.
+        # 예) float64에서 14.5는 str()→"14.5" → 정확히 .5 → 올림(15)
+        #     float64에서 14.4999...998은 str()→"14.499999999999998" → .5 미만 → 내림(14)
+        # epsilon 보정을 쓰면 14.4999...998 같은 값이 .5를 넘겨 올림이 되어
+        # 엑셀 결과와 1 차이가 나는 과보정 버그가 발생하므로 제거한다.
         number = Decimal(str(value))
-        # 계산 중 123.5 가 123.49999999999999 처럼 들어오는 부동소수점
-        # 경계 오차만 보정해 Excel ROUND 결과와 맞춘다.
-        epsilon = Decimal("1e-12").scaleb(-digits)
-        number = number + epsilon if number >= 0 else number - epsilon
         quantizer = Decimal("1").scaleb(-digits)
         rounded = number.quantize(quantizer, rounding=ROUND_HALF_UP)
     except Exception:

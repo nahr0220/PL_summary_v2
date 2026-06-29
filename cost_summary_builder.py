@@ -1496,9 +1496,17 @@ def _append_process_category_columns(final_df, combined_cost_driver_df):
     final_df.loc[inspection_mask, "공정별_RQI"] = 0.5
 
     # 공정별_전체 = 4개 합
-    final_df[PROCESS_CATEGORY_TOTAL_COLUMN] = sum(
-        pd.to_numeric(final_df[c], errors="coerce").fillna(0)
-        for c in PROCESS_CATEGORY_COLUMNS.keys()
+    # float64 누적 덧셈은 5.10+2.30+1.20+1.38=9.9799... 같은 오차가 생기므로
+    # 행별로 Decimal 덧셈해서 정확한 십진수 합을 구한다
+    from decimal import Decimal as _Decimal
+    def _decimal_row_sum(row):
+        return float(sum(_Decimal(str(v)) for v in row))
+    cols_for_total = list(PROCESS_CATEGORY_COLUMNS.keys())
+    final_df[PROCESS_CATEGORY_TOTAL_COLUMN] = (
+        final_df[cols_for_total]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(0)
+        .apply(_decimal_row_sum, axis=1)
     )
 
     return final_df
@@ -1840,14 +1848,10 @@ def _get_previous_master_cost_group_df(settlement_year, settlement_month):
     rows = master_df[
         yr.eq(prev_year)
         & mo.eq(prev_month)
-        & sales_type.isin(["사내매출", "위탁매출"])
     ].copy()
     if rows.empty:
         return None
 
-    if "기말_수량" in rows.columns:
-        ending_qty = pd.to_numeric(rows["기말_수량"], errors="coerce").fillna(0)
-        rows = rows[ending_qty.eq(1)]
     if rows.empty:
         return None
 
@@ -1865,10 +1869,16 @@ def _get_previous_master_cost_group_df(settlement_year, settlement_month):
     if rows.empty:
         return None
 
+    # 당사/타사 컬럼이 있으면 groupby 키에 포함 (사내/위탁매출 + 당사/타사 칼럼�� 채)
+    groupby_keys = ["상품ID"]
+    if "당사/타사" in rows.columns:
+        rows["당사/타사"] = rows["당사/타사"].astype(str).str.strip()
+        groupby_keys.append("당사/타사")
+
     for src in available_sources:
         rows[src] = pd.to_numeric(rows[src], errors="coerce").fillna(0)
 
-    previous_df = rows.groupby("상품ID", as_index=False)[available_sources].sum()
+    previous_df = rows.groupby(groupby_keys, as_index=False)[available_sources].sum()
     return previous_df.rename(columns=source_to_target)
 
 
@@ -2091,8 +2101,41 @@ def _append_inventory_quantity_amount_columns(
                 inv["매출원가_전월"], errors="coerce"
             ).fillna(0)
             inv = inv[inv["상품ID"].ne("")]
-            base_cost_map = inv.groupby("상품ID")["매출원가_전월"].sum().to_dict()
-            base_amount = product_id_series.map(base_cost_map).fillna(0).astype(float)
+            _is_from_master = bool(getattr(inventory_df, "attrs", {}).get("_from_master_inventory"))
+            if _is_from_master and "매출구분" in final_df.columns:
+                # 전월 마스터 파일에서 직접 최신파일 쵬출 후 전체 매출구분 대상으로 상품ID+매출구분 SUMIFS
+                _path = _find_latest_cost_summary_path()
+                _master_raw = None
+                if _path is not None:
+                    try:
+                        _master_raw = pd.read_excel(_path, sheet_name="최종원가마스터")
+                    except Exception:
+                        try:
+                            _master_raw = pd.read_excel(_path)
+                        except Exception:
+                            pass
+                if _master_raw is not None and not _master_raw.empty:
+                    _settle_year = int(settlement_year) if settlement_year else None
+                    _settle_month = int(settlement_month) if settlement_month else None
+                    if _settle_month == 1:
+                        _prev_year, _prev_month = _settle_year - 1, 12
+                    else:
+                        _prev_year, _prev_month = _settle_year, _settle_month - 1
+                    _yr = pd.to_numeric(_master_raw.get("회계연도"), errors="coerce")
+                    _mo = pd.to_numeric(_master_raw.get("회계월"), errors="coerce")
+                    _mrows = _master_raw[_yr.eq(_prev_year) & _mo.eq(_prev_month)].copy()
+                    if not _mrows.empty and "기말_금액" in _mrows.columns:
+                        _mrows["상품ID"] = _mrows["상품ID"].astype(str).str.strip()
+                        _mrows["매출구분"] = _mrows["매출구분"].astype(str).str.strip()
+                        _mrows["기말_금액"] = pd.to_numeric(_mrows["기말_금액"], errors="coerce").fillna(0)
+                        _base_df = _mrows.groupby(["상품ID", "매출구분"])["기말_금액"].sum().reset_index()
+                        _base_df["_key"] = _base_df["상품ID"] + "|" + _base_df["매출구분"]
+                        _lookup = (product_id_series + "|" + final_df["매출구분"].astype(str).str.strip())
+                        _base_map = _base_df.set_index("_key")["기말_금액"].to_dict()
+                        base_amount = _lookup.map(_base_map).fillna(0).astype(float)
+            else:
+                base_cost_map = inv.groupby("상품ID")["매출원가_전월"].sum().to_dict()
+                base_amount = product_id_series.map(base_cost_map).fillna(0).astype(float)
     base_amount = base_amount.where(qty_base.eq(1), 0)
     final_df["기초_금액"] = base_amount
 
@@ -2203,25 +2246,14 @@ def _append_inventory_quantity_amount_columns(
         - normal_out_qty - asset_qty - etc_qty
     )
 
-    # ----- 기말_금액 = 당사차량: 입고금액합 - 정상출고 - 자산출고 - 기타출고
-    #                  위탁매출: 기초_금액 + 입고금액합 - 정상출고_금액 -----
+    # ----- 기말_금액 = 기초_금액 + 입고금액합 - 정상출고 - 자산출고 - 기타출고 -----
     ending_amount = (
         inbound_amount_sum
         - normal_out_amount
         - final_df["자산출고_금액"]
         - final_df["기타출고_금액"]
     )
-    consignment_mask = sales_type_series.eq("위탁매출")
-    base_amount = pd.to_numeric(final_df["기초_금액"], errors="coerce").fillna(0)
-    consignment_ending_amount = (
-        base_amount
-        + inbound_amount_sum
-        - normal_out_amount
-    )
-    final_df["기말_금액"] = ending_amount.where(own_vehicle_mask, 0)
-    final_df["기말_금액"] = final_df["기말_금액"].where(
-        ~consignment_mask, consignment_ending_amount
-    )
+    final_df["기말_금액"] = ending_amount
 
     # 위탁출고구분: 위탁수불부 출고여부==1 인 행의 출고상태 값 (상품ID 매칭)
     status_map = _build_consignment_outbound_status_map(consignment_ledger_df)
@@ -2325,7 +2357,17 @@ def _append_cost_group_cumulative_columns(
             ]
             if target_columns:
                 final_df = final_df.drop(columns=target_columns)
-                final_df = _merge_by_product_id(final_df, previous_master_df, target_columns)
+                # 상품ID + 매출구분 + 당사/타사 로 merge
+                # (상품ID만 쓰면 당사/타사가 다른 행에 엉뚱항 값이 붙는 문제 방지)
+                _merge_keys = ["상품ID"]
+                if "당사/타사" in final_df.columns and "당사/타사" in previous_master_df.columns:
+                    _merge_keys.append("당사/타사")
+                _left = final_df.copy()
+                _right = previous_master_df[[*_merge_keys, *target_columns]].copy()
+                for _k in _merge_keys:
+                    _left[_k] = _left[_k].astype(str).str.strip()
+                    _right[_k] = _right[_k].astype(str).str.strip()
+                final_df = _left.merge(_right, on=_merge_keys, how="left")
                 for column in target_columns:
                     final_df[column] = pd.to_numeric(
                         final_df[column], errors="coerce"

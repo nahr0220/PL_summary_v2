@@ -17,11 +17,17 @@ import pandas as pd
 
 # 제조경비 배부 내역을 모듈 레벨에도 저장 (df.attrs 가 pandas 연산/캐시로 사라질 때 대비)
 _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS = []
+_LAST_MATERIAL_ALLOCATION_DIAGNOSTICS = []
 
 
 def get_last_manufacturing_expense_diagnostics():
     """가장 최근 build 의 제조경비 배부 내역 반환 (df.attrs 백업용)."""
     return _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS
+
+
+def get_last_material_allocation_diagnostics():
+    """가장 최근 build 의 재료비 배부 내역 반환 (df.attrs 백업용)."""
+    return _LAST_MATERIAL_ALLOCATION_DIAGNOSTICS
 
 from cost_summary_preprocess import (
     # 상수
@@ -60,6 +66,8 @@ def _aggregate_sheet_amounts_by_product_id(
     amount_column_candidates,
     output_column,
     apply_exclusion=False,
+    settlement_year=None,
+    settlement_month=None,
 ):
     """sheet_prefix 로 시작하는 시트들에서 amount 컬럼을 모아 상품ID별 합계 (음수 부호)."""
     frames = []
@@ -75,11 +83,20 @@ def _aggregate_sheet_amounts_by_product_id(
         if amount_column is None:
             continue
 
+        # 회계연도/회계월 필터 (settlement_year/month 참촘서)
+        temp = df.copy()
+        if settlement_year is not None and "회계연도" in temp.columns:
+            temp = temp[pd.to_numeric(temp["회계연도"], errors="coerce").eq(int(settlement_year))]
+        if settlement_month is not None and "회계월" in temp.columns:
+            temp = temp[pd.to_numeric(temp["회계월"], errors="coerce").eq(int(settlement_month))]
+        if temp.empty:
+            continue
+
         selected_columns = ["상품ID", amount_column]
-        if apply_exclusion and "제외대상" in df.columns:
+        if apply_exclusion and "제외대상" in temp.columns:
             selected_columns.append("제외대상")
 
-        temp = df[selected_columns].copy()
+        temp = temp[selected_columns].copy()
         if apply_exclusion and "제외대상" in temp.columns:
             temp = temp[~_is_flag_one(temp["제외대상"])].copy()
             temp = temp.drop(columns=["제외대상"])
@@ -153,7 +170,7 @@ def _aggregate_ledger_by_cost_type(purchase_cost_sheet_dfs, cost_type):
     return result
 
 
-def _extract_product_ledger_aggregates(purchase_cost_sheet_dfs):
+def _extract_product_ledger_aggregates(purchase_cost_sheet_dfs, settlement_year=None, settlement_month=None):
     """상품원장 시트에서 (cost_totals, transfer_in_map, purchase_amount_df) 추출."""
     required_columns = ["상품ID", "원가구분", "금액"]
     frames = []
@@ -164,7 +181,14 @@ def _extract_product_ledger_aggregates(purchase_cost_sheet_dfs):
             continue
         if any(column not in df.columns for column in required_columns):
             continue
-        frames.append(df[required_columns].copy())
+        _df = df.copy()
+        if settlement_year is not None and "회계연도" in _df.columns:
+            _df = _df[pd.to_numeric(_df["회계연도"], errors="coerce").eq(int(settlement_year))]
+        if settlement_month is not None and "회계월" in _df.columns:
+            _df = _df[pd.to_numeric(_df["회계월"], errors="coerce").eq(int(settlement_month))]
+        if _df.empty:
+            continue
+        frames.append(_df[required_columns].copy())
 
     cost_totals = {column: 0 for column in PRODUCT_LEDGER_TOTAL_COST_COLUMNS}
     transfer_in_map = {}
@@ -333,7 +357,16 @@ def _allocate_amount_proportional(
     if weights_sum == 0:
         return 0.0, float(weights_sum)
 
-    allocations = _excel_round_series(weights / weights_sum * total_amount)
+    # float64 나눗셈/곱셈 오차 방지: Decimal로 각 행 계산
+    from decimal import Decimal, ROUND_HALF_UP
+    _total = Decimal(str(total_amount))
+    _wsum = Decimal(str(weights_sum))
+    def _dec_alloc(w):
+        if w != w or w == 0:
+            return 0
+        result = Decimal(str(w)) / _wsum * _total
+        return int(result.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    allocations = weights.apply(_dec_alloc)
     # int dtype 컬럼에 float 대입 방지 (pandas 2.x)
     final_df[target_column] = pd.to_numeric(
         final_df[target_column], errors="coerce"
@@ -453,7 +486,7 @@ def _get_material_cost_total_from_verification(
     return None
 
 
-def _aggregate_material_cost_by_product_id(manufacturing_cost_sheet_dfs):
+def _aggregate_material_cost_by_product_id(manufacturing_cost_sheet_dfs, settlement_year=None, settlement_month=None):
     """재료비 시트들에서 매출구분이 '검사매출'이 아닌 행만 추려
     (상품ID, 매출구분)별 금액 합산.
 
@@ -477,7 +510,16 @@ def _aggregate_material_cost_by_product_id(manufacturing_cost_sheet_dfs):
         if amount_column is None:
             continue
 
-        temp = df[["상품ID", "매출구분", amount_column]].copy()
+        # 회계연도/회계월 필터
+        _df = df.copy()
+        if settlement_year is not None and "회계연도" in _df.columns:
+            _df = _df[pd.to_numeric(_df["회계연도"], errors="coerce").eq(int(settlement_year))]
+        if settlement_month is not None and "회계월" in _df.columns:
+            _df = _df[pd.to_numeric(_df["회계월"], errors="coerce").eq(int(settlement_month))]
+        if _df.empty:
+            continue
+
+        temp = _df[["상품ID", "매출구분", amount_column]].copy()
         temp["매출구분"] = temp["매출구분"].astype(str).str.strip()
         temp = temp[~temp["매출구분"].eq("검사매출")]
         # 원가구분 == '재료비' 만 직접에 포함 (페인트는 별도 컬럼으로 분리)
@@ -505,7 +547,7 @@ def _aggregate_material_cost_by_product_id(manufacturing_cost_sheet_dfs):
     )["재료비_직접"].sum()
 
 
-def _aggregate_paint_amount(manufacturing_cost_sheet_dfs):
+def _aggregate_paint_amount(manufacturing_cost_sheet_dfs, settlement_year=None, settlement_month=None):
     """재료비 시트에서 원가구분 == '페인트' 인 행의 금액 합 반환."""
     if not manufacturing_cost_sheet_dfs:
         return 0.0
@@ -523,8 +565,17 @@ def _aggregate_paint_amount(manufacturing_cost_sheet_dfs):
         if amount_column is None:
             continue
 
-        cost_type = df["원가구분"].astype(str).str.strip()
-        paint_rows = df[cost_type.eq("페인트")]
+        # 회계연도/회계월 필터
+        _df = df.copy()
+        if settlement_year is not None and "회계연도" in _df.columns:
+            _df = _df[pd.to_numeric(_df["회계연도"], errors="coerce").eq(int(settlement_year))]
+        if settlement_month is not None and "회계월" in _df.columns:
+            _df = _df[pd.to_numeric(_df["회계월"], errors="coerce").eq(int(settlement_month))]
+        if _df.empty:
+            continue
+
+        cost_type = _df["원가구분"].astype(str).str.strip()
+        paint_rows = _df[cost_type.eq("페인트")]
         if paint_rows.empty:
             continue
 
@@ -534,10 +585,10 @@ def _aggregate_paint_amount(manufacturing_cost_sheet_dfs):
     return total
 
 
-def _append_material_paint_column(final_df, manufacturing_cost_sheet_dfs):
+def _append_material_paint_column(final_df, manufacturing_cost_sheet_dfs, settlement_year=None, settlement_month=None):
     """재료비_페인트 컬럼 추가 (도장 시간 비례 배부, 정수 단가 × 도장시간).
 
-    분자: 재료비 시트에서 원가구분=='페인트' 행 금액 합
+    분자: 재료비 시트에서 원가구분=='페인트' 행 금액 합 (회계연도/회계월 일치)
     분모: 공정별_도장 (=유효실측시간_도장) 행 전체 합
     단가 = Excel ROUND(분자 / 분모, 0) — 정수
     각 행 = 단가 × 그 행의 공정별_도장
@@ -546,7 +597,7 @@ def _append_material_paint_column(final_df, manufacturing_cost_sheet_dfs):
     """
     final_df["재료비_페인트"] = 0
 
-    paint_total = _aggregate_paint_amount(manufacturing_cost_sheet_dfs)
+    paint_total = _aggregate_paint_amount(manufacturing_cost_sheet_dfs, settlement_year=settlement_year, settlement_month=settlement_month)
     if paint_total == 0:
         return final_df
 
@@ -566,13 +617,6 @@ def _append_material_paint_column(final_df, manufacturing_cost_sheet_dfs):
         paint_total,
         final_df["공정별_도장"],
     )
-
-    # 재료비_합 = 직접 + 배부 + 페인트
-    if "재료비_합" in final_df.columns:
-        final_df["재료비_합"] = (
-            pd.to_numeric(final_df["재료비_합"], errors="coerce").fillna(0)
-            + pd.to_numeric(final_df["재료비_페인트"], errors="coerce").fillna(0)
-        )
     return final_df
 
 
@@ -582,6 +626,7 @@ def _append_material_cost_columns(
     verification_sheets=None,
     settlement_year=None,
     settlement_month=None,
+    diagnostics=None,
 ):
     """재료비_직접 / 재료비_배부 / 재료비_합 컬럼을 부여.
 
@@ -595,7 +640,7 @@ def _append_material_cost_columns(
     final_df["재료비_합"] = 0
 
     # 1) 재료비_직접 집계 (상품ID + 매출구분 으로 머지)
-    aggregated_df = _aggregate_material_cost_by_product_id(manufacturing_cost_sheet_dfs)
+    aggregated_df = _aggregate_material_cost_by_product_id(manufacturing_cost_sheet_dfs, settlement_year=settlement_year, settlement_month=settlement_month)
     if (
         aggregated_df is not None and not aggregated_df.empty
         and "매출구분" in final_df.columns
@@ -631,28 +676,68 @@ def _append_material_cost_columns(
         direct_sum = pd.to_numeric(
             final_df["재료비_직접"], errors="coerce"
         ).fillna(0).sum()
-        allocation_total = total_material_cost - direct_sum
+        # 페인트는 이미 _append_material_paint_column 에서 계산된 컬럼 값 사용
+        # (시트 원본과 배부 결과의 라운딩 차이 방지)
+        paint_col = (
+            pd.to_numeric(final_df["재료비_페인트"], errors="coerce").fillna(0)
+            if "재료비_페인트" in final_df.columns
+            else pd.Series(0, index=final_df.index)
+        )
+        paint_sum = float(paint_col.sum())
+        allocation_total = total_material_cost - direct_sum - paint_sum
 
         if allocation_total != 0:
             non_inspection_mask = ~final_df["매출구분"].astype(str).str.strip().eq("검사매출")
+            # 비율 가중치 = 재료비_직접 + 재료비_페인트 (위에서 계산한 paint_col 재사용)
+            weight_series = (
+                pd.to_numeric(final_df["재료비_직접"], errors="coerce").fillna(0)
+                + paint_col
+            )
             _allocate_amount_proportional(
                 final_df,
                 "재료비_배부",
                 allocation_total,
-                final_df["재료비_직접"],
+                weight_series,
                 non_inspection_mask,
             )
             _adjust_material_allocation_to_target(
                 final_df,
                 allocation_total,
                 non_inspection_mask,
-                final_df["재료비_직접"],
+                weight_series,
             )
 
-    # 3) 재료비_합 = 직접 + 배부
+        if diagnostics is not None:
+            paint_col_sum = (
+                pd.to_numeric(final_df["재료비_페인트"], errors="coerce").fillna(0).sum()
+                if "재료비_페인트" in final_df.columns else 0
+            )
+            diagnostics.append({
+                "구분": "재료비",
+                "컬럼": "재료비_배부",
+                "배부총액(분자)": allocation_total,
+                "실제배부값합": pd.to_numeric(final_df["재료비_배부"], errors="coerce").fillna(0).sum(),
+                "가중치합(분모)": direct_sum + paint_col_sum,
+                "단가": "",
+                "비고": (
+                    f"검증시트 재료비 합계 {total_material_cost:,.0f}"
+                    f" - 재료비_직접 합 {direct_sum:,.0f}"
+                    f" - 페인트 합 {paint_sum:,.0f}"
+                    f" = 배부총액 {allocation_total:,.0f}"
+                    f" | 가중치합(직접+페인트) {direct_sum + paint_col_sum:,.0f}"
+                ),
+            })
+
+    # 3) 재료비_합 = 직접 + 배부 + 페인트
+    paint_series = (
+        pd.to_numeric(final_df["재료비_페인트"], errors="coerce").fillna(0)
+        if "재료비_페인트" in final_df.columns
+        else pd.Series(0, index=final_df.index)
+    )
     final_df["재료비_합"] = (
         pd.to_numeric(final_df["재료비_직접"], errors="coerce").fillna(0)
         + pd.to_numeric(final_df["재료비_배부"], errors="coerce").fillna(0)
+        + paint_series
     )
     return final_df
 
@@ -694,7 +779,7 @@ def _manufacturing_expense_target_names():
     } | {MANUFACTURING_EXPENSE_GIFT_TARGET, MANUFACTURING_EXPENSE_DIRECT_TARGET}
 
 
-def _aggregate_direct_expense_by_product_id(manufacturing_cost_sheet_dfs):
+def _aggregate_direct_expense_by_product_id(manufacturing_cost_sheet_dfs, settlement_year=None, settlement_month=None):
     """직접경비 시트들에서 (상품ID, 매출구분)별 금액 합계 dict 반환.
 
     반환: {(상품ID, 매출구분): 금액 합}
@@ -716,7 +801,16 @@ def _aggregate_direct_expense_by_product_id(manufacturing_cost_sheet_dfs):
         if amount_column is None:
             continue
 
-        temp = df[["상품ID", amount_column]].copy()
+        # 회계연도/회계월 필터
+        _df = df.copy()
+        if settlement_year is not None and "회계연도" in _df.columns:
+            _df = _df[pd.to_numeric(_df["회계연도"], errors="coerce").eq(int(settlement_year))]
+        if settlement_month is not None and "회계월" in _df.columns:
+            _df = _df[pd.to_numeric(_df["회계월"], errors="coerce").eq(int(settlement_month))]
+        if _df.empty:
+            continue
+
+        temp = _df[["상품ID", amount_column]].copy()
         temp["_매출구분"] = (
             df["매출구분"].astype(str).str.strip()
             if "매출구분" in df.columns
@@ -984,6 +1078,8 @@ def _append_manufacturing_expense_columns(
 
     amount_by_product_id = _aggregate_direct_expense_by_product_id(
         manufacturing_cost_sheet_dfs,
+        settlement_year=settlement_year,
+        settlement_month=settlement_month,
     )
     if amount_by_product_id:
         product_id_series = final_df["상품ID"].astype(str).str.strip()
@@ -1454,7 +1550,13 @@ def _aggregate_process_hours(combined_cost_driver_df):
     if df.empty:
         return {}
 
-    grouped = df.groupby(["상품ID", "매출구분", "구분"])["측정시간(H)"].sum()
+    # groupby().sum()은 float64 누적 덧셈이라 9.10+0.88=9.979999... 같은 오차가 생길 수 있으므로
+    # Decimal로 정확하게 합산한다
+    from decimal import Decimal as _Decimal
+    grouped = (
+        df.groupby(["상품ID", "매출구분", "구분"])["측정시간(H)"]
+        .apply(lambda s: float(sum(_Decimal(str(v)) for v in s)))
+    )
     return grouped.to_dict()
 
 
@@ -2446,19 +2548,22 @@ def _reorder_final_columns(
         공정별_전체, 공정별_RQI, 공정별_정비, 공정별_판금, 공정별_도장
     """
     final_df = _append_total_purchase_cost_columns(final_df)
-    final_df = _append_material_cost_columns(
-        final_df, manufacturing_cost_sheet_dfs,
-        verification_sheets=verification_sheets,
-        settlement_year=settlement_year,
-        settlement_month=settlement_month,
-    )
     final_df = _append_cost_driver_columns(
         final_df, cost_driver_dfs, settlement_year, settlement_month,
     )
     final_df = _append_process_category_columns(final_df, combined_cost_driver_df)
     # 재료비_페인트: 공정별_도장 이 만들어진 후 호출 (도장 시간 비례)
-    final_df = _append_material_paint_column(final_df, manufacturing_cost_sheet_dfs)
+    final_df = _append_material_paint_column(final_df, manufacturing_cost_sheet_dfs, settlement_year=settlement_year, settlement_month=settlement_month)
+    material_allocation_diagnostics = []
     cost_allocation_diagnostics = []
+    # 재료비_배부 내역 (페인트 이후에 diagnostics 기록)
+    final_df = _append_material_cost_columns(
+        final_df, manufacturing_cost_sheet_dfs,
+        verification_sheets=verification_sheets,
+        settlement_year=settlement_year,
+        settlement_month=settlement_month,
+        diagnostics=material_allocation_diagnostics,
+    )
     # 노무비는 공정별 컬럼이 채워진 후에 계산해야 함 (분모로 공정별_*_합 사용)
     final_df = _append_labor_cost_columns(
         final_df,
@@ -2474,10 +2579,12 @@ def _reorder_final_columns(
         diagnostics=cost_allocation_diagnostics,
     )
     # 진단 내역을 결과 DataFrame 의 attrs 에 저장 (UI 에서 표시용)
+    final_df.attrs["재료비_배부내역"] = material_allocation_diagnostics
     final_df.attrs["제조경비_배부내역"] = cost_allocation_diagnostics
     # df.attrs 가 이후 연산/캐시로 사라질 수 있으므로 모듈 레벨에도 백업
-    global _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS
+    global _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS, _LAST_MATERIAL_ALLOCATION_DIAGNOSTICS
     _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS = cost_allocation_diagnostics
+    _LAST_MATERIAL_ALLOCATION_DIAGNOSTICS = material_allocation_diagnostics
 
     # 제조경비_합계 = 직접 + 임차 + 전체 + RQI + 정비 + 판금 + 도장 + 선물 + 기타배부
     manufacturing_expense_all_columns = (
@@ -2611,7 +2718,9 @@ def _reorder_final_columns(
     final_df = final_df[ordered]
 
     # 최종 출력 컬럼명으로 변경 (계산은 내부 이름으로 끝났고 표시용만 rename)
+    _saved_attrs = dict(final_df.attrs)
     final_df = final_df.rename(columns=_build_output_column_rename_map())
+    final_df.attrs.update(_saved_attrs)
 
     # 최종 정렬
     final_df = _sort_final_cost_df(final_df)
@@ -2685,6 +2794,7 @@ def _sort_final_cost_df(final_df):
         kind="stable",
     ).drop(columns=["_sales_key", "_qty_key", "_date_key"]).reset_index(drop=True)
 
+    df.attrs.update(final_df.attrs)
     return df
 
 
@@ -2799,7 +2909,7 @@ def build_final_cost_df(
 
     # 1) 상품원장에서 집계
     cost_totals, transfer_in_map, purchase_amount_df = (
-        _extract_product_ledger_aggregates(purchase_cost_sheet_dfs)
+        _extract_product_ledger_aggregates(purchase_cost_sheet_dfs, settlement_year=settlement_year, settlement_month=settlement_month)
     )
 
     if purchase_amount_df is not None:
@@ -2815,6 +2925,8 @@ def build_final_cost_df(
         amount_column_candidates=WASTE_RESOURCE_AMOUNT_COLUMNS,
         output_column=WASTE_RESOURCE_COLUMN,
         apply_exclusion=True,
+        settlement_year=settlement_year,
+        settlement_month=settlement_month,
     )
     final_df = _apply_aggregated_amount(final_df, waste_df, WASTE_RESOURCE_COLUMN)
 
@@ -2825,6 +2937,8 @@ def build_final_cost_df(
         amount_column_candidates=PAYBACK_RETURN_AMOUNT_COLUMNS,
         output_column=PAYBACK_RETURN_COLUMN,
         apply_exclusion=False,
+        settlement_year=settlement_year,
+        settlement_month=settlement_month,
     )
     final_df = _apply_aggregated_amount(final_df, payback_df, PAYBACK_RETURN_COLUMN)
 

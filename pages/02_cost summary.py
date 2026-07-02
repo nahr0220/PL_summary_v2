@@ -47,10 +47,10 @@ from cost_summary_preprocess import (
     workbook_to_excel_bytes,
     _excel_round,
 )
-from cost_summary_builder import build_final_cost_df, get_last_manufacturing_expense_diagnostics
+from cost_summary_builder import build_final_cost_df, get_last_manufacturing_expense_diagnostics, get_last_material_allocation_diagnostics
 
 
-COST_SUMMARY_CALC_VERSION = "rounding-half-up-epsilon-v1"
+COST_SUMMARY_CALC_VERSION = "process-category-ts-v6"
 
 
 def _build_input_fingerprint(*dfs_and_values):
@@ -100,8 +100,7 @@ def _cached_build_final_cost_df(
     cache_key = "_final_cost_cache"
     cached = st.session_state.get(cache_key)
     if cached is not None and cached.get("fingerprint") == fingerprint:
-        # 진단도 함께 복원 (모듈 백업에 다시 세팅)
-        return cached["result"], cached.get("diagnostics", [])
+        return cached["result"], cached.get("diagnostics", []), cached.get("material_diagnostics", [])
 
     result = build_final_cost_df(
         product_id_df,
@@ -116,12 +115,14 @@ def _cached_build_final_cost_df(
         consignment_ledger_df=consignment_ledger_df,
     )
     diagnostics = get_last_manufacturing_expense_diagnostics()
+    material_diagnostics = result.attrs.get("재료비_배부내역") or get_last_material_allocation_diagnostics()
     st.session_state[cache_key] = {
         "fingerprint": fingerprint,
         "result": result,
         "diagnostics": diagnostics,
+        "material_diagnostics": material_diagnostics,
     }
-    return result, diagnostics
+    return result, diagnostics, material_diagnostics
 
 
 # ============================================================
@@ -558,7 +559,7 @@ COST_DRIVER_SHEET_RULE = {
     "rtcsm": "settlement",
     "rtc": "settlement",
     "sm": "settlement",
-    "RTLS": "품질개선_RTLS",
+    "RTLS": "all",
     "TS": "all",
     "AQI실적": "all",
 }
@@ -659,6 +660,10 @@ def render_cost_driver_upload(settlement_year=None, settlement_month=None):
                     settlement_year, settlement_month,
                 ):
                     continue
+            elif isinstance(sheet_rule, str) and sheet_rule.startswith("contains:"):
+                needle = sheet_rule.split(":", 1)[1].strip().lower()
+                if needle and needle not in str(sheet_name).lower():
+                    continue
             else:
                 # prefix 문자열
                 if not str(sheet_name).startswith(sheet_rule):
@@ -716,6 +721,13 @@ def render_cost_driver_upload(settlement_year=None, settlement_month=None):
                     f"파일에 있는 시트: {all_sheet_names}"
                 )
             elif isinstance(sheet_rule, str) and sheet_rule not in ("all", "settlement"):
+                if sheet_rule.startswith("contains:"):
+                    needle = sheet_rule.split(":", 1)[1].strip()
+                    st.warning(
+                        f"⚠️ {file.name}: 시트명에 '{needle}' 가 포함된 시트를 찾을 수 없습니다. "
+                        f"파일에 있는 시트: {all_sheet_names}"
+                    )
+                    continue
                 st.warning(
                     f"⚠️ {file.name}: 시트명이 '{sheet_rule}' 로 시작하는 시트가 없습니다. "
                     f"파일에 있는 시트: {all_sheet_names}"
@@ -746,15 +758,15 @@ COMBINED_DRIVER_COLUMNS = [
 
 # 구분 변환 규칙 (공정 → 구분)
 # 엑셀 수식 동등:
-#   IF(공정 IN {"RQI","차옥션성능","법적성능","TS"}, "RQI",
+#   IF(공정 IN {"RQI","리본카옥션성능","법적성능","TS"}, "RQI",
 #     IF(공정="TU","정비",
 #       IF(공정="PL","판금",
 #         IF(공정="PA","도장", 공정))))
 PROCESS_TO_CATEGORY = {
     "RQI": "RQI",
+    "리본카옥션성능": "RQI",
     "차옥션성능": "RQI",
     "법적성능": "RQI",
-    "법정성능": "RQI",
     "TS": "RQI",
     "TU": "정비",
     "PL": "판금",
@@ -906,20 +918,20 @@ def _parse_time_value(value):
 KOREAN_HOLIDAYS_FALLBACK = {
     2025: [
         "2025-01-01", "2025-01-27", "2025-01-28", "2025-01-29", "2025-01-30",
-        "2025-03-01", "2025-03-03", "2025-05-05", "2025-05-06", "2025-06-03",
+        "2025-03-01", "2025-03-03", "2025-05-01", "2025-05-05", "2025-05-06", "2025-06-03",
         "2025-06-06", "2025-08-15", "2025-10-03", "2025-10-06", "2025-10-07",
         "2025-10-08", "2025-10-09", "2025-12-25",
     ],
     2026: [
         "2026-01-01", "2026-02-16", "2026-02-17", "2026-02-18", "2026-03-01",
-        "2026-03-02", "2026-05-05", "2026-05-24", "2026-05-25", "2026-06-03",
+        "2026-03-02", "2026-05-01", "2026-05-05", "2026-05-24", "2026-05-25", "2026-06-03",
         "2026-06-06", "2026-07-17", "2026-08-15", "2026-08-17", "2026-09-24",
         "2026-09-25", "2026-09-26", "2026-10-03", "2026-10-05", "2026-10-09",
         "2026-12-25",
     ],
     2027: [
         "2027-01-01", "2027-02-06", "2027-02-07", "2027-02-08", "2027-02-09",
-        "2027-03-01", "2027-05-05", "2027-05-13", "2027-06-06", "2027-06-07",
+        "2027-03-01", "2027-05-01", "2027-05-05", "2027-05-13", "2027-06-06", "2027-06-07",
         "2027-08-15", "2027-08-16", "2027-09-14", "2027-09-15", "2027-09-16",
         "2027-10-03", "2027-10-04", "2027-10-09", "2027-10-11", "2027-12-25",
     ],
@@ -942,8 +954,13 @@ def _build_korean_holiday_checker(year_hint=None):
     # 1순위: holidays 패키지
     try:
         import holidays
+        import datetime as _dt
         kr = holidays.country_holidays("KR", years=sorted(years))
-        return {d for d in kr.keys()}
+        holiday_set = {d for d in kr.keys()}
+        # 근로자의 날(5월 1일)은 holidays 패키지에 미포함 → 수동 추가
+        for y in years:
+            holiday_set.add(_dt.date(y, 5, 1))
+        return holiday_set
     except Exception:
         pass
 
@@ -1322,7 +1339,7 @@ def render_final_cost(
 ):
     st.subheader("차량별 원가현황")
 
-    final_cost_df, _cached_diag = _cached_build_final_cost_df(
+    final_cost_df, _cached_diag, _cached_material_diag = _cached_build_final_cost_df(
         product_id_df,
         purchase_cost_sheet_dfs,
         dfs.get("기초재고_전체"),
@@ -1342,19 +1359,16 @@ def render_final_cost(
     if not purchase_cost_sheet_dfs:
         st.info("매입원가의 상품원장 데이터를 업로드하면 금액 컬럼이 채워집니다.")
 
-    # 노무비/제조경비 배부 내역 (분자 / 분모 / 단가)
-    # 캐시된 진단 우선 → attrs → 모듈 백업 순
-    expense_diagnostics = _cached_diag
-    if not expense_diagnostics:
-        expense_diagnostics = final_cost_df.attrs.get("제조경비_배부내역")
-    if not expense_diagnostics:
-        expense_diagnostics = get_last_manufacturing_expense_diagnostics()
-    if expense_diagnostics:
-        with st.expander("🔍 노무비/제조경비 배부 내역 (배부총액 ÷ 가중치합 = 단가)"):
-            diag_df = pd.DataFrame(expense_diagnostics)
+    # 재료비/노무비/제조경비 배부 내역 통합 expander
+    material_diagnostics = _cached_material_diag or final_cost_df.attrs.get("재료비_배부내역") or get_last_material_allocation_diagnostics()
+    expense_diagnostics = _cached_diag or final_cost_df.attrs.get("제조경비_배부내역") or get_last_manufacturing_expense_diagnostics()
+
+    all_diagnostics = list(material_diagnostics or []) + list(expense_diagnostics or [])
+    if all_diagnostics:
+        with st.expander("🔍 재료비/노무비/제조경비 배부 내역"):
+            diag_df = pd.DataFrame(all_diagnostics)
             display_diag = diag_df.copy()
 
-            # 컬럼 순서: 구분 / 컬럼 / 배부총액(분자) / 실제배부값합 / 가중치합(분모) / 단가 / 비고
             preferred_order = [
                 "구분", "컬럼", "배부총액(분자)", "실제배부값합",
                 "가중치합(분모)", "단가", "비고",
@@ -1363,18 +1377,15 @@ def render_final_cost(
             ordered += [c for c in display_diag.columns if c not in ordered]
             display_diag = display_diag[ordered]
 
-            # 금액 컬럼(분자/실제배부값): 정수, 천단위 콤마
             for col in ["배부총액(분자)", "실제배부값합"]:
                 if col in display_diag.columns:
                     display_diag[col] = display_diag[col].apply(
                         lambda v: f"{_excel_round(v):,}" if isinstance(v, (int, float)) else v
                     )
-            # 가중치합(분모): 실제 계산에 쓰는 소수값 그대로 표시 (라운드하면 단가 검산이 안 맞음)
             if "가중치합(분모)" in display_diag.columns:
                 display_diag["가중치합(분모)"] = display_diag["가중치합(분모)"].apply(
                     lambda v: (f"{v:,.4f}".rstrip("0").rstrip(".") if isinstance(v, (int, float)) else v)
                 )
-            # 단가: 소수점 유지 (배부 비율이라 정밀도 필요)
             if "단가" in display_diag.columns:
                 display_diag["단가"] = display_diag["단가"].apply(
                     lambda v: f"{v:,.4f}".rstrip("0").rstrip(".") if isinstance(v, (int, float)) else v

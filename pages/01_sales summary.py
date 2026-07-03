@@ -287,8 +287,23 @@ with tab1:  # VIEW (매출요약정보)
             )
 
         if not master_df.empty:
+            top_filtered_df = master_df
+            if '판매연도' in master_df.columns:
+                _top_years = sorted(master_df['판매연도'].dropna().unique().tolist(), reverse=True)
+                if _top_years:
+                    _top_year_col, _ = st.columns([1, 3])
+                    with _top_year_col:
+                        _top_selected_years = st.multiselect(
+                            "판매연도", _top_years, default=[_top_years[0]], key="view_monthly_years",
+                        )
+                    if not _top_selected_years:
+                        st.info("판매연도를 선택하세요.")
+                        top_filtered_df = master_df.iloc[0:0]
+                    else:
+                        top_filtered_df = master_df[master_df['판매연도'].isin(_top_selected_years)]
+
             # 1. 기존 데이터 피벗 (상품/위탁, 소/도매 기준)
-            s_p = master_df.pivot_table(index=['상품/위탁', '소/도매'], columns='판매월', values='상품ID', aggfunc='count', fill_value=0, observed=False).astype(int)
+            s_p = top_filtered_df.pivot_table(index=['상품/위탁', '소/도매'], columns='판매월', values='상품ID', aggfunc='count', fill_value=0, observed=False).astype(int)
 
             # 2. 월별 컬럼 재색인 및 연간 총합 계산
             s_p = s_p.reindex(columns=range(1, 13), fill_value=0)
@@ -321,7 +336,7 @@ with tab1:  # VIEW (매출요약정보)
             )
 
             # 1. 기존 데이터 처리 (Melt & Pivot)
-            rev = master_df.melt(id_vars=['소/도매', '판매월'], value_vars=['상품매출', '용역매출'], var_name='매출항목', value_name='금액')
+            rev = top_filtered_df.melt(id_vars=['소/도매', '판매월'], value_vars=['상품매출', '용역매출'], var_name='매출항목', value_name='금액')
             r_p = rev.pivot_table(index=['매출항목', '소/도매'], columns='판매월', values='금액', aggfunc='sum', fill_value=0, observed=False).astype(int)
 
             # 2. 월별 컬럼 재색인 및 연간 총합 계산
@@ -339,7 +354,7 @@ with tab1:  # VIEW (매출요약정보)
             # 최종 출력
             st.markdown("""
                 <div style="display:flex; justify-content:space-between; align-items:flex-end;">
-                    <div style="font-size:20px; font-weight:bold;">월별 매출</div>
+                    <div style="font-size:20px; font-weight:bold;">월별 매출액</div>
                     <div style="font-size:12px; color:gray;">(단위: 원)</div>
                 </div>
                 """, unsafe_allow_html=True)

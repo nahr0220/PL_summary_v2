@@ -58,6 +58,19 @@ def _read_excel_cached(path, mtime, sheet_name=None):
     return pd.read_excel(path, sheet_name=sheet_name)
 
 
+def _memoize(cache_name, fingerprint, compute_fn):
+    """fingerprint 가 이전 호출과 같으면 session_state 에 저장된 결과를 재사용.
+
+    위젯 조작으로 스크립트가 재실행돼도 관련 없는 변경이면 무거운 재계산(엑셀 생성 등)을 건너뜀."""
+    cache_key = f"_memo_{cache_name}"
+    cached = st.session_state.get(cache_key)
+    if cached is not None and cached.get("fingerprint") == fingerprint:
+        return cached["result"]
+    result = compute_fn()
+    st.session_state[cache_key] = {"fingerprint": fingerprint, "result": result}
+    return result
+
+
 def load_final_cost_master():
     """cost_summary_YYYYMMDD.xlsx 중 가장 최근 파일 불러오기.
 
@@ -331,6 +344,22 @@ with tab1:
                 )
 
                 if not merged_df.empty:
+                    monthly_df = merged_df
+                    if '판매연도' in merged_df.columns:
+                        _monthly_years = sorted(merged_df['판매연도'].dropna().unique().tolist(), reverse=True)
+                        if _monthly_years:
+                            _monthly_year_col, _ = st.columns([1, 3])
+                            with _monthly_year_col:
+                                _monthly_selected_years = st.multiselect(
+                                    "판매연도", _monthly_years,
+                                    default=[_monthly_years[0]], key="summary_monthly_years",
+                                )
+                            if not _monthly_selected_years:
+                                st.info("판매연도를 선택하세요.")
+                                monthly_df = merged_df.iloc[0:0]
+                            else:
+                                monthly_df = merged_df[merged_df['판매연도'].isin(_monthly_selected_years)].copy()
+
                     _toggle_l, _toggle_r = st.columns([9, 1])
                     with _toggle_r:
                         if hasattr(st, "toggle"):
@@ -436,7 +465,7 @@ with tab1:
                         )
 
                     # 1. 월별 판매 대수 (상품/위탁 × 소/도매)
-                    s_p = merged_df.pivot_table(
+                    s_p = monthly_df.pivot_table(
                         index=['상품/위탁', '소/도매'], columns='판매월',
                         values='상품ID', aggfunc='count', fill_value=0, observed=False,
                     ).astype(int)
@@ -458,12 +487,12 @@ with tab1:
                     # 2. 월별 매출 (상품매출 / 용역매출 × 소/도매)
                     if all(c in merged_df.columns for c in ['상품매출', '용역매출']):
                         # 매출 = 상품매출 + 용역매출 (행별 합)
-                        merged_df["_매출합"] = (
-                            pd.to_numeric(merged_df['상품매출'], errors='coerce').fillna(0)
-                            + pd.to_numeric(merged_df['용역매출'], errors='coerce').fillna(0)
+                        monthly_df["_매출합"] = (
+                            pd.to_numeric(monthly_df['상품매출'], errors='coerce').fillna(0)
+                            + pd.to_numeric(monthly_df['용역매출'], errors='coerce').fillna(0)
                         )
                         # 판매대수 표와 동일 기준: 상품/위탁 × 소/도매
-                        r_p = merged_df.pivot_table(
+                        r_p = monthly_df.pivot_table(
                             index=['상품/위탁', '소/도매'], columns='판매월',
                             values='_매출합', aggfunc='sum', fill_value=0, observed=False,
                         ).astype(int)
@@ -512,11 +541,11 @@ with tab1:
 
                         flat_combined, hl_combined = _flatten_dense_multiindex(combined)
                         _render_month_table(
-                            "월별 매출", _amount_caption("대당 매출"), flat_combined, hl_combined,
+                            "월별 매출액", _amount_caption("대당 매출"), flat_combined, hl_combined,
                         )
 
                         # 임시 컬럼 정리
-                        merged_df.drop(columns=['_매출합'], inplace=True)
+                        monthly_df.drop(columns=['_매출합'], inplace=True)
 
                     # ===== 월별 매출원가 (상품판매/위탁판매 × 매입원가/제조원가 × 소매/도매) =====
                     if all(c in merged_df.columns for c in ['매입원가_누적합계', '제조원가_누적합계']):
@@ -768,6 +797,7 @@ with tab1:
             month_col = _find_column(merged_df, ["판매월", "매출월", "월"])
 
             filtered_df = merged_df
+            start_key = end_key = None
             if year_col is not None and month_col is not None:
                 ym = merged_df[[year_col, month_col]].copy()
                 ym[year_col] = pd.to_numeric(ym[year_col], errors="coerce")
@@ -807,14 +837,22 @@ with tab1:
 
             st.write(f"**건수**: {len(filtered_df):,}건")
 
-            # 엑셀 다운로드
-            from io import BytesIO
-            buf = BytesIO()
-            with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-                filtered_df.to_excel(writer, index=False, sheet_name="차량별 손익현황")
+            # 엑셀 다운로드 (원본 파일·기간 선택이 안 바뀌면 재생성하지 않음)
+            def _build_vehicle_pl_excel_bytes():
+                from io import BytesIO
+                buf = BytesIO()
+                with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+                    filtered_df.to_excel(writer, index=False, sheet_name="차량별 손익현황")
+                return buf.getvalue()
+
+            _master_mtime = os.path.getmtime(master_file) if os.path.exists(master_file) else None
             st.download_button(
                 "차량별 손익현황 다운로드",
-                data=buf.getvalue(),
+                data=_memoize(
+                    "vehicle_pl_download",
+                    (_master_mtime, len(filtered_df), start_key, end_key),
+                    _build_vehicle_pl_excel_bytes,
+                ),
                 file_name="차량별_손익현황.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )

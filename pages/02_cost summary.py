@@ -55,33 +55,18 @@ COST_SUMMARY_CALC_VERSION = "process-category-ts-v6"
 
 
 def _build_input_fingerprint(*dfs_and_values):
-    """빌드 입력의 지문 생성 (shape + 숫자합계 + 스칼라값).
+    """빌드 입력의 지문 생성.
 
-    shape 뿐 아니라 숫자 컬럼 합계도 포함해, 행수가 같고 값만 바뀐 경우도 감지.
+    DataFrame/dict 인자는 id() 기반으로 비교한다. 이 앱의 DataFrame/dict 들은 전부 자신만의
+    _memoize 캐시 슬롯에서 나오므로(안 바뀌면 항상 같은 객체, 바뀌면 새 객체로 교체) id() 비교만으로
+    변경 여부를 정확히 판단할 수 있고, 매 리런마다 전체 데이터를 훑는 비용을 없앨 수 있다.
+    (예전에는 df.select_dtypes(...).sum().sum() 으로 전체 숫자 컬럼을 매 리런마다 스캔했음 — 리런이
+    잦은 UPLOAD 탭에서 체감 지연/먹통의 주요 원인이었음)
     """
-    def df_signature(df):
-        try:
-            numeric_sum = float(
-                pd.to_numeric(
-                    df.select_dtypes(include="number").sum().sum(), errors="coerce"
-                )
-            )
-        except Exception:
-            numeric_sum = 0.0
-        return (df.shape, tuple(map(str, df.columns)), _excel_round(numeric_sum, 2))
-
     parts = [("calc_version", COST_SUMMARY_CALC_VERSION)]
     for item in dfs_and_values:
-        if isinstance(item, pd.DataFrame):
-            parts.append(("df", df_signature(item)))
-        elif isinstance(item, dict):
-            sub = []
-            for k, v in sorted(item.items(), key=lambda x: str(x[0])):
-                if isinstance(v, pd.DataFrame):
-                    sub.append((str(k), df_signature(v)))
-                else:
-                    sub.append((str(k), str(type(v))))
-            parts.append(("dict", tuple(sub)))
+        if isinstance(item, (pd.DataFrame, dict)):
+            parts.append(("ref", id(item)))
         else:
             parts.append(("val", str(item)))
     return repr(parts)
@@ -203,7 +188,11 @@ def render_sheet_workbook(sheet_dfs, download_label, file_name, empty_message):
         return
     st.download_button(
         download_label,
-        data=workbook_to_excel_bytes(sheet_dfs),
+        # sheet_dfs 가 안 바뀐 채(id로 식별) 리런될 때 워크북 재생성 방지
+        data=_memoize(
+            f"workbook_download_{file_name}", (id(sheet_dfs),),
+            lambda: workbook_to_excel_bytes(sheet_dfs),
+        ),
         file_name=file_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
@@ -380,14 +369,22 @@ def render_base_upload(settlement_year, settlement_month):
     ):
         st.divider()
         st.subheader("- 상품ID 확인")
-        product_id_df = collect_product_ids(dfs, settlement_year, settlement_month)
+        # dfs 가 안 바뀐 채(id로 식별) 리런될 때 재계산 방지 + product_id_df 자체도 안정적인 참조가 되어
+        # 이 값을 지문에 사용하는 다른 캐시(_cached_build_final_cost_df 등)도 같이 효과를 봄
+        product_id_df = _memoize(
+            "collect_product_ids", (id(dfs), settlement_year, settlement_month),
+            lambda: collect_product_ids(dfs, settlement_year, settlement_month),
+        )
 
         if not product_id_df.empty:
             st.write(f"데이터 건수: {len(product_id_df):,}건")
             with st.expander("구분 포함 상세 보기"):
                 st.download_button(
                     "엑셀 다운로드",
-                    data=dataframe_to_excel_bytes(product_id_df, sheet_name="구분포함상세"),
+                    data=_memoize(
+                        "product_id_detail_download", (id(product_id_df),),
+                        lambda: dataframe_to_excel_bytes(product_id_df, sheet_name="구분포함상세"),
+                    ),
                     file_name="product_id_detail.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 )
@@ -1361,7 +1358,10 @@ def render_combined_cost_driver(
 
         st.download_button(
             "통합 원가동인 다운로드",
-            data=dataframe_to_excel_bytes(combined_df, sheet_name="원가동인통합"),
+            data=_memoize(
+                "combined_cost_driver_download", (id(combined_df),),
+                lambda: dataframe_to_excel_bytes(combined_df, sheet_name="원가동인통합"),
+            ),
             file_name="cost_driver_combined.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="cost_driver_combined_download",
@@ -1779,7 +1779,7 @@ def _compute_accounting_tables(master_df):
             "당기입고": (in_q, in_a),
             "정상입고": (normal_in_q, normal_in_a),
             "타계정입고": (transfer_in_q, transfer_in_a),
-            "제조원가": (0, mfg_a),
+            "제조원가": (base_q, mfg_a),
             "당기출고": (out_q, out_a),
             "정상출고": (normal_out_q, normal_out_a),
             "자산출고": (asset_out_q, asset_out_a),
@@ -1942,14 +1942,18 @@ def render_accounting_section(master_df=None):
         if available_years:
             _year_col, _ = st.columns([1, 3])
             with _year_col:
-                selected_year = st.selectbox(
-                    "회계연도", available_years, key="accounting_section_year",
+                selected_years = st.multiselect(
+                    "회계연도", available_years,
+                    default=[available_years[0]], key="accounting_section_years",
                 )
+            if not selected_years:
+                st.info("회계연도를 선택하세요.")
+                return
             master_df = master_df[
-                pd.to_numeric(master_df["회계연도"], errors="coerce") == selected_year
+                pd.to_numeric(master_df["회계연도"], errors="coerce").isin(selected_years)
             ]
             if master_df.empty:
-                st.info(f"{selected_year}년 데이터가 없습니다.")
+                st.info("선택한 연도의 데이터가 없습니다.")
                 return
 
     tables = _compute_accounting_tables(master_df)

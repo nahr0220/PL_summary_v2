@@ -10,6 +10,8 @@
     - 타사차량 행은 모든 금액 0 처리
 """
 
+import functools
+import os
 import re
 
 import numpy as np
@@ -1868,6 +1870,32 @@ def _find_latest_cost_summary_path():
     return matched[0][0]
 
 
+@functools.lru_cache(maxsize=2)
+def _read_master_df_cached(path, mtime, size):
+    """(path, mtime, size)가 같으면 재사용 — 같은 실행/리런 내 중복 읽기 방지.
+
+    maxsize를 작게 유지해 큰 마스터 DataFrame이 여러 버전 메모리에 쌓이지 않게 함
+    (Streamlit Cloud 메모리 한도 대응)."""
+    try:
+        return pd.read_excel(path, sheet_name="최종원가마스터")
+    except Exception:
+        try:
+            return pd.read_excel(path)
+        except Exception:
+            return None
+
+
+def _read_master_df(path):
+    """누적 마스터(cost_summary_*.xlsx)를 읽되, 파일이 바뀌지 않았으면 캐시된 결과를 재사용."""
+    if path is None:
+        return None
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return _read_master_df_cached(path, stat.st_mtime, stat.st_size)
+
+
 def _get_previous_master_prepaid_product_ids(settlement_year, settlement_month):
     """직전월 최종원가마스터에서 선매입 상품ID 집합 반환."""
     if settlement_year is None or settlement_month is None:
@@ -1883,14 +1911,7 @@ def _get_previous_master_prepaid_product_ids(settlement_year, settlement_month):
     path = _find_latest_cost_summary_path()
     if path is None:
         return set()
-    try:
-        master_df = pd.read_excel(path, sheet_name="최종원가마스터")
-    except Exception:
-        try:
-            master_df = pd.read_excel(path)
-        except Exception:
-            return set()
-
+    master_df = _read_master_df(path)
     if master_df is None or master_df.empty:
         return set()
     if not {"회계연도", "회계월", "상품ID"}.issubset(master_df.columns):
@@ -1932,13 +1953,7 @@ def _get_previous_master_cost_group_df(settlement_year, settlement_month):
     path = _find_latest_cost_summary_path()
     if path is None:
         return None
-    try:
-        master_df = pd.read_excel(path, sheet_name="최종원가마스터")
-    except Exception:
-        try:
-            master_df = pd.read_excel(path)
-        except Exception:
-            return None
+    master_df = _read_master_df(path)
 
     required = {"회계연도", "회계월", "상품ID", "매출구분"}
     if master_df is None or master_df.empty or not required.issubset(master_df.columns):
@@ -2008,14 +2023,7 @@ def _build_inventory_df_from_master(settlement_year, settlement_month):
     path = _find_latest_cost_summary_path()
     if path is None:
         return None
-    try:
-        master_df = pd.read_excel(path, sheet_name="최종원가마스터")
-    except Exception:
-        try:
-            master_df = pd.read_excel(path)
-        except Exception:
-            return None
-
+    master_df = _read_master_df(path)
     if master_df is None or master_df.empty:
         return None
 
@@ -2207,15 +2215,7 @@ def _append_inventory_quantity_amount_columns(
             if _is_from_master and "매출구분" in final_df.columns:
                 # 전월 마스터 파일에서 직접 최신파일 쵬출 후 전체 매출구분 대상으로 상품ID+매출구분 SUMIFS
                 _path = _find_latest_cost_summary_path()
-                _master_raw = None
-                if _path is not None:
-                    try:
-                        _master_raw = pd.read_excel(_path, sheet_name="최종원가마스터")
-                    except Exception:
-                        try:
-                            _master_raw = pd.read_excel(_path)
-                        except Exception:
-                            pass
+                _master_raw = _read_master_df(_path) if _path is not None else None
                 if _master_raw is not None and not _master_raw.empty:
                     _settle_year = int(settlement_year) if settlement_year else None
                     _settle_month = int(settlement_month) if settlement_month else None

@@ -10,6 +10,7 @@
     7. 페이지 엔트리
 """
 
+import os
 import re
 import importlib
 
@@ -84,6 +85,46 @@ def _build_input_fingerprint(*dfs_and_values):
         else:
             parts.append(("val", str(item)))
     return repr(parts)
+
+
+def _files_fingerprint(files):
+    """업로드 파일 리스트의 지문. 내용 대신 file_id/이름/크기만 사용(가볍고, 같은 파일이 재업로드되지 않는 한 충분히 유일함)."""
+    if not files:
+        return ()
+    return tuple(
+        (getattr(f, "file_id", None), getattr(f, "name", None), getattr(f, "size", None))
+        for f in files
+    )
+
+
+def _master_file_state():
+    """현재 참조되는 누적 마스터 파일의 (경로, mtime). 저장으로 마스터가 바뀌면 캐시를 무효화하는 데 사용."""
+    try:
+        path = _cost_summary_builder._find_latest_cost_summary_path()
+    except Exception:
+        return None
+    if path is None:
+        return None
+    try:
+        return (path, os.path.getmtime(path))
+    except OSError:
+        return None
+
+
+def _memoize(cache_name, fingerprint_parts, compute_fn):
+    """fingerprint_parts 가 이전 호출과 같으면 session_state 에 저장된 결과를 재사용.
+
+    Streamlit 은 위젯 조작마다 스크립트 전체를 재실행하므로, 관련 없는 위젯을 건드렸을 때도
+    업로드 파일을 매번 재파싱하지 않도록 하기 위함. 실제 파일/입력이 바뀌면 정상적으로 재계산됨.
+    """
+    cache_key = f"_memo_{cache_name}"
+    fingerprint = _build_input_fingerprint(*fingerprint_parts)
+    cached = st.session_state.get(cache_key)
+    if cached is not None and cached.get("fingerprint") == fingerprint:
+        return cached["result"]
+    result = compute_fn()
+    st.session_state[cache_key] = {"fingerprint": fingerprint, "result": result}
+    return result
 
 
 def _cached_build_final_cost_df(
@@ -259,68 +300,80 @@ def render_base_upload(settlement_year, settlement_month):
         "원가대상 업로드(기초재고/매입조회/전체상품조회/위탁수불부/복수비용_검사/복수비용_정비)", type=["xlsx"], accept_multiple_files=True,
     )
 
-    dfs = initialize_base_dfs()
-    product_id_df = empty_product_id_df()
+    def _compute_base_dfs():
+        local_dfs = initialize_base_dfs()
 
-    if uploaded_files:
-        file_map = {file.name: file for file in uploaded_files}
+        if uploaded_files:
+            file_map = {file.name: file for file in uploaded_files}
 
-        for fname, file in file_map.items():
+            for fname, file in file_map.items():
+                try:
+                    process_base_file(fname, file, local_dfs, settlement_year, settlement_month)
+                except Exception as exc:
+                    st.error(f"{fname} 처리 중 오류: {exc}")
+
+            process_opening_inventory_files(file_map, local_dfs)
+
+        # 기초재고가 비어있으면 누적 마스터에서 자동 생성 (직전월 기말_수량==1)
+        inventory_now = local_dfs.get("기초재고")
+        if inventory_now is None or (
+            isinstance(inventory_now, pd.DataFrame) and inventory_now.empty
+        ):
             try:
-                process_base_file(fname, file, dfs, settlement_year, settlement_month)
-            except Exception as exc:
-                st.error(f"{fname} 처리 중 오류: {exc}")
-
-        process_opening_inventory_files(file_map, dfs)
-
-    # 기초재고가 비어있으면 누적 마스터에서 자동 생성 (직전월 기말_수량==1)
-    inventory_now = dfs.get("기초재고")
-    if inventory_now is None or (
-        isinstance(inventory_now, pd.DataFrame) and inventory_now.empty
-    ):
-        try:
-            from cost_summary_builder import (
-                _build_inventory_df_from_master,
-                _get_previous_master_prepaid_product_ids,
-            )
-            prepaid_product_ids = _get_previous_master_prepaid_product_ids(
-                settlement_year, settlement_month,
-            )
-            if (
-                prepaid_product_ids
-                and isinstance(dfs.get("매입조회"), pd.DataFrame)
-                and not dfs["매입조회"].empty
-            ):
-                before_count = len(dfs["매입조회"])
-                prepaid_filter_df = pd.DataFrame({
-                    "상품ID": sorted(prepaid_product_ids),
-                    "선매입여부": ["선매입"] * len(prepaid_product_ids),
-                })
-                dfs["매입조회"] = filter_purchase_inquiry(
-                    dfs["매입조회"], prepaid_filter_df,
+                from cost_summary_builder import (
+                    _build_inventory_df_from_master,
+                    _get_previous_master_prepaid_product_ids,
                 )
-                removed_count = before_count - len(dfs["매입조회"])
-                if removed_count > 0:
-                    st.info(
-                        f"전월 마스터 선매입 차량 {removed_count:,}건을 "
-                        "매입조회에서 제외했습니다."
+                prepaid_product_ids = _get_previous_master_prepaid_product_ids(
+                    settlement_year, settlement_month,
+                )
+                if (
+                    prepaid_product_ids
+                    and isinstance(local_dfs.get("매입조회"), pd.DataFrame)
+                    and not local_dfs["매입조회"].empty
+                ):
+                    before_count = len(local_dfs["매입조회"])
+                    prepaid_filter_df = pd.DataFrame({
+                        "상품ID": sorted(prepaid_product_ids),
+                        "선매입여부": ["선매입"] * len(prepaid_product_ids),
+                    })
+                    local_dfs["매입조회"] = filter_purchase_inquiry(
+                        local_dfs["매입조회"], prepaid_filter_df,
                     )
+                    removed_count = before_count - len(local_dfs["매입조회"])
+                    if removed_count > 0:
+                        st.info(
+                            f"전월 마스터 선매입 차량 {removed_count:,}건을 "
+                            "매입조회에서 제외했습니다."
+                        )
 
-            auto_inv = _build_inventory_df_from_master(
-                settlement_year, settlement_month,
-            )
-            if auto_inv is not None and not auto_inv.empty:
-                dfs["기초재고"] = auto_inv
-                dfs["기초재고_전체"] = auto_inv
-                prev_y = settlement_year - 1 if settlement_month == 1 else settlement_year
-                prev_m = 12 if settlement_month == 1 else settlement_month - 1
-                st.info(
-                    f"기초재고 파일이 업로드되지 않아 누적 마스터에서 "
-                    f"{prev_y}-{prev_m:02d} 기말 데이터를 자동으로 가져왔습니다. "
-                    f"({len(auto_inv):,}건)"
+                auto_inv = _build_inventory_df_from_master(
+                    settlement_year, settlement_month,
                 )
-        except Exception as exc:
-            st.warning(f"기초재고 자동 생성 중 오류: {exc}")
+                if auto_inv is not None and not auto_inv.empty:
+                    local_dfs["기초재고"] = auto_inv
+                    local_dfs["기초재고_전체"] = auto_inv
+                    prev_y = settlement_year - 1 if settlement_month == 1 else settlement_year
+                    prev_m = 12 if settlement_month == 1 else settlement_month - 1
+                    st.info(
+                        f"기초재고 파일이 업로드되지 않아 누적 마스터에서 "
+                        f"{prev_y}-{prev_m:02d} 기말 데이터를 자동으로 가져왔습니다. "
+                        f"({len(auto_inv):,}건)"
+                    )
+            except Exception as exc:
+                st.warning(f"기초재고 자동 생성 중 오류: {exc}")
+
+        return local_dfs
+
+    dfs = _memoize(
+        "base_upload",
+        (
+            _files_fingerprint(uploaded_files), settlement_year, settlement_month,
+            _master_file_state(),
+        ),
+        _compute_base_dfs,
+    )
+    product_id_df = empty_product_id_df()
 
     if uploaded_files or (
         isinstance(dfs.get("기초재고"), pd.DataFrame) and not dfs["기초재고"].empty
@@ -448,8 +501,12 @@ def render_purchase_cost_upload(product_id_df, dfs, settlement_year, settlement_
     if len(uploaded_cost_files) > 3:
         st.warning("원가 파일은 3개까지 업로드")
 
-    cost_sheet_dfs = preprocess_purchase_cost_files(
-        uploaded_cost_files, product_id_df, dfs, settlement_year, settlement_month,
+    cost_sheet_dfs = _memoize(
+        "purchase_cost_upload",
+        (_files_fingerprint(uploaded_cost_files), product_id_df, dfs, settlement_year, settlement_month),
+        lambda: preprocess_purchase_cost_files(
+            uploaded_cost_files, product_id_df, dfs, settlement_year, settlement_month,
+        ),
     )
     render_sheet_workbook(
         cost_sheet_dfs,
@@ -476,64 +533,73 @@ def render_manufacturing_cost_upload(product_id_df, settlement_year, settlement_
     if not uploaded_files:
         return manufacturing_cost_sheet_dfs
 
-    # 노무비 / 부문별경비 (여러 파일 통합 처리)
-    combined_files_specs = [
-        ("노무비", "노무비"),
-        ("부문별경비", "제조경비"),
-    ]
-    for filename_keyword, cost_type in combined_files_specs:
-        matching_files = [f for f in uploaded_files if filename_keyword in f.name]
-        if not matching_files:
-            continue
-        try:
-            combined_df = preprocess_combined_manufacturing_cost_files(
-                matching_files, cost_type, settlement_year, settlement_month,
-            )
-            label = _unique_sheet_label(manufacturing_cost_sheet_dfs, filename_keyword)
-            manufacturing_cost_sheet_dfs[label] = combined_df
-        except Exception as exc:
-            st.error(f"{filename_keyword} 파일 처리 중 오류: {exc}")
+    def _compute_manufacturing_cost_sheet_dfs():
+        local_sheet_dfs = {}
 
-    # 그 외 파일들
-    combined_keywords = ("노무비", "부문별경비")
-    for file in uploaded_files:
-        if any(keyword in file.name for keyword in combined_keywords):
-            continue
-        try:
-            file_label = file.name.rsplit(".", 1)[0]
+        # 노무비 / 부문별경비 (여러 파일 통합 처리)
+        combined_files_specs = [
+            ("노무비", "노무비"),
+            ("부문별경비", "제조경비"),
+        ]
+        for filename_keyword, cost_type in combined_files_specs:
+            matching_files = [f for f in uploaded_files if filename_keyword in f.name]
+            if not matching_files:
+                continue
+            try:
+                combined_df = preprocess_combined_manufacturing_cost_files(
+                    matching_files, cost_type, settlement_year, settlement_month,
+                )
+                label = _unique_sheet_label(local_sheet_dfs, filename_keyword)
+                local_sheet_dfs[label] = combined_df
+            except Exception as exc:
+                st.error(f"{filename_keyword} 파일 처리 중 오류: {exc}")
 
-            if "재료비" in file.name:
-                file_sheets = preprocess_material_cost_file(file, product_id_df)
-                display_label = "재료비"
-            elif "직접경비" in file.name:
-                file_sheets = preprocess_direct_expense_file(file, product_id_df)
-                display_label = "직접경비"
-            else:
-                file_sheets = preprocess_cost_file(file)
-                display_label = None
+        # 그 외 파일들
+        combined_keywords = ("노무비", "부문별경비")
+        for file in uploaded_files:
+            if any(keyword in file.name for keyword in combined_keywords):
+                continue
+            try:
+                file_label = file.name.rsplit(".", 1)[0]
 
-            for sheet_name, df in file_sheets.items():
-                output_sheet_name = display_label or f"{file_label}_{sheet_name}"
-                manufacturing_cost_sheet_dfs[
-                    _unique_sheet_label(manufacturing_cost_sheet_dfs, output_sheet_name)
-                ] = df
-        except Exception as exc:
-            st.error(f"{file.name} 처리 중 오류: {exc}")
+                if "재료비" in file.name:
+                    file_sheets = preprocess_material_cost_file(file, product_id_df)
+                    display_label = "재료비"
+                elif "직접경비" in file.name:
+                    file_sheets = preprocess_direct_expense_file(file, product_id_df)
+                    display_label = "직접경비"
+                else:
+                    file_sheets = preprocess_cost_file(file)
+                    display_label = None
 
-    # 원하는 탭 순서: 재료비 → 노무비 → 부문별경비 → 직접경비
-    # (없는 키는 건너뜀, 그 외 키는 뒤에 자연 순서로)
-    _MFG_TAB_ORDER_PREFIXES = ["재료비", "노무비", "부문별경비", "직접경비"]
+                for sheet_name, df in file_sheets.items():
+                    output_sheet_name = display_label or f"{file_label}_{sheet_name}"
+                    local_sheet_dfs[
+                        _unique_sheet_label(local_sheet_dfs, output_sheet_name)
+                    ] = df
+            except Exception as exc:
+                st.error(f"{file.name} 처리 중 오류: {exc}")
 
-    def _mfg_order_key(label):
-        for i, prefix in enumerate(_MFG_TAB_ORDER_PREFIXES):
-            if str(label).startswith(prefix):
-                return i
-        return len(_MFG_TAB_ORDER_PREFIXES)  # 매칭 안 된 건 맨 뒤
+        # 원하는 탭 순서: 재료비 → 노무비 → 부문별경비 → 직접경비
+        # (없는 키는 건너뜀, 그 외 키는 뒤에 자연 순서로)
+        _MFG_TAB_ORDER_PREFIXES = ["재료비", "노무비", "부문별경비", "직접경비"]
 
-    manufacturing_cost_sheet_dfs = {
-        k: manufacturing_cost_sheet_dfs[k]
-        for k in sorted(manufacturing_cost_sheet_dfs.keys(), key=_mfg_order_key)
-    }
+        def _mfg_order_key(label):
+            for i, prefix in enumerate(_MFG_TAB_ORDER_PREFIXES):
+                if str(label).startswith(prefix):
+                    return i
+            return len(_MFG_TAB_ORDER_PREFIXES)  # 매칭 안 된 건 맨 뒤
+
+        return {
+            k: local_sheet_dfs[k]
+            for k in sorted(local_sheet_dfs.keys(), key=_mfg_order_key)
+        }
+
+    manufacturing_cost_sheet_dfs = _memoize(
+        "manufacturing_cost_upload",
+        (_files_fingerprint(uploaded_files), product_id_df, settlement_year, settlement_month),
+        _compute_manufacturing_cost_sheet_dfs,
+    )
 
     render_sheet_workbook(
         manufacturing_cost_sheet_dfs,
@@ -626,112 +692,122 @@ def render_cost_driver_upload(settlement_year=None, settlement_month=None):
     if not uploaded_files:
         return cost_driver_dfs
 
-    settlement_candidates = _build_settlement_sheet_name_candidates(
-        settlement_year, settlement_month,
-    )
+    def _compute_cost_driver_dfs():
+        local_cost_driver_dfs = {}
+        settlement_candidates = _build_settlement_sheet_name_candidates(
+            settlement_year, settlement_month,
+        )
 
-    for file in uploaded_files:
-        matched_keyword = _match_cost_driver_keyword(file.name)
-        if matched_keyword is None:
-            st.warning(
-                f"{file.name}: AQI실적, TS, RTLS, RTCSM, RTC, SM 중 하나가 파일명에 포함되어야 합니다."
-            )
-            continue
-
-        try:
-            sheets = pd.read_excel(file, sheet_name=None)
-        except Exception as exc:
-            st.error(f"{file.name} 처리 중 오류: {exc}")
-            continue
-
-        sheet_rule = COST_DRIVER_SHEET_RULE.get(matched_keyword, "all")
-        all_sheet_names = list(sheets.keys())  # 디버그용
-
-        cleaned_sheets = {}
-        for sheet_name, df in sheets.items():
-            # 시트 선택 규칙
-            if sheet_rule == "all":
-                pass  # 모든 시트 사용
-            elif sheet_rule == "settlement":
-                if not settlement_candidates:
-                    pass  # 결산월 미지정 시 모든 시트 사용
-                elif not _sheet_matches_settlement(
-                    sheet_name, settlement_candidates,
-                    settlement_year, settlement_month,
-                ):
-                    continue
-            elif isinstance(sheet_rule, str) and sheet_rule.startswith("contains:"):
-                needle = sheet_rule.split(":", 1)[1].strip().lower()
-                if needle and needle not in str(sheet_name).lower():
-                    continue
-            else:
-                # prefix 문자열
-                if not str(sheet_name).startswith(sheet_rule):
-                    continue
-
-            df.columns = [str(c).strip() for c in df.columns]
-            df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
-            if df.empty:
-                continue
-            # rtc 파일은 '상품아이디' 컬럼을 '상품ID' 로 통일
-            if "상품ID" not in df.columns and "상품아이디" in df.columns:
-                df = df.rename(columns={"상품아이디": "상품ID"})
-            cleaned_sheets[sheet_name] = df
-
-        if cleaned_sheets:
-            # rtcsm 통합 파일: 각 시트의 '데이터구분' 컬럼으로 rtc / sm 분리
-            if matched_keyword == "rtcsm":
-                rtc_sheets, sm_sheets = {}, {}
-                for sheet_name, df in cleaned_sheets.items():
-                    if "데이터구분" not in df.columns:
-                        st.warning(
-                            f"⚠️ {file.name} / {sheet_name}: '데이터구분' 컬럼이 없어 "
-                            f"rtc/sm 분리 불가, 건너뜀."
-                        )
-                        continue
-                    kind = df["데이터구분"].astype(str).str.strip().str.lower()
-                    rtc_df = df[kind.eq("rtc")].reset_index(drop=True)
-                    sm_df = df[kind.eq("sm")].reset_index(drop=True)
-                    if not rtc_df.empty:
-                        rtc_sheets[sheet_name] = rtc_df
-                    if not sm_df.empty:
-                        sm_sheets[sheet_name] = sm_df
-
-                if rtc_sheets:
-                    cost_driver_dfs["rtc"] = rtc_sheets
-                if sm_sheets:
-                    cost_driver_dfs["sm"] = sm_sheets
-                st.success(
-                    f"✅ {file.name} → [rtcsm 통합] "
-                    f"rtc: {len(rtc_sheets)}시트 / sm: {len(sm_sheets)}시트 "
-                    f"(시트: {list(cleaned_sheets.keys())})"
-                )
-            else:
-                cost_driver_dfs[matched_keyword] = cleaned_sheets
-                st.success(
-                    f"✅ {file.name} → [{matched_keyword}] "
-                    f"선택된 시트: {list(cleaned_sheets.keys())}"
-                )
-        else:
-            if sheet_rule == "settlement" and settlement_candidates:
+        for file in uploaded_files:
+            matched_keyword = _match_cost_driver_keyword(file.name)
+            if matched_keyword is None:
                 st.warning(
-                    f"⚠️ {file.name}: 결산연도-월"
-                    f"({settlement_year}-{int(settlement_month):02d}) "
-                    f"에 해당하는 시트를 찾을 수 없습니다. "
-                    f"파일에 있는 시트: {all_sheet_names}"
+                    f"{file.name}: AQI실적, TS, RTLS, RTCSM, RTC, SM 중 하나가 파일명에 포함되어야 합니다."
                 )
-            elif isinstance(sheet_rule, str) and sheet_rule not in ("all", "settlement"):
-                if sheet_rule.startswith("contains:"):
-                    needle = sheet_rule.split(":", 1)[1].strip()
+                continue
+
+            try:
+                sheets = pd.read_excel(file, sheet_name=None)
+            except Exception as exc:
+                st.error(f"{file.name} 처리 중 오류: {exc}")
+                continue
+
+            sheet_rule = COST_DRIVER_SHEET_RULE.get(matched_keyword, "all")
+            all_sheet_names = list(sheets.keys())  # 디버그용
+
+            cleaned_sheets = {}
+            for sheet_name, df in sheets.items():
+                # 시트 선택 규칙
+                if sheet_rule == "all":
+                    pass  # 모든 시트 사용
+                elif sheet_rule == "settlement":
+                    if not settlement_candidates:
+                        pass  # 결산월 미지정 시 모든 시트 사용
+                    elif not _sheet_matches_settlement(
+                        sheet_name, settlement_candidates,
+                        settlement_year, settlement_month,
+                    ):
+                        continue
+                elif isinstance(sheet_rule, str) and sheet_rule.startswith("contains:"):
+                    needle = sheet_rule.split(":", 1)[1].strip().lower()
+                    if needle and needle not in str(sheet_name).lower():
+                        continue
+                else:
+                    # prefix 문자열
+                    if not str(sheet_name).startswith(sheet_rule):
+                        continue
+
+                df.columns = [str(c).strip() for c in df.columns]
+                df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+                if df.empty:
+                    continue
+                # rtc 파일은 '상품아이디' 컬럼을 '상품ID' 로 통일
+                if "상품ID" not in df.columns and "상품아이디" in df.columns:
+                    df = df.rename(columns={"상품아이디": "상품ID"})
+                cleaned_sheets[sheet_name] = df
+
+            if cleaned_sheets:
+                # rtcsm 통합 파일: 각 시트의 '데이터구분' 컬럼으로 rtc / sm 분리
+                if matched_keyword == "rtcsm":
+                    rtc_sheets, sm_sheets = {}, {}
+                    for sheet_name, df in cleaned_sheets.items():
+                        if "데이터구분" not in df.columns:
+                            st.warning(
+                                f"⚠️ {file.name} / {sheet_name}: '데이터구분' 컬럼이 없어 "
+                                f"rtc/sm 분리 불가, 건너뜀."
+                            )
+                            continue
+                        kind = df["데이터구분"].astype(str).str.strip().str.lower()
+                        rtc_df = df[kind.eq("rtc")].reset_index(drop=True)
+                        sm_df = df[kind.eq("sm")].reset_index(drop=True)
+                        if not rtc_df.empty:
+                            rtc_sheets[sheet_name] = rtc_df
+                        if not sm_df.empty:
+                            sm_sheets[sheet_name] = sm_df
+
+                    if rtc_sheets:
+                        local_cost_driver_dfs["rtc"] = rtc_sheets
+                    if sm_sheets:
+                        local_cost_driver_dfs["sm"] = sm_sheets
+                    st.success(
+                        f"✅ {file.name} → [rtcsm 통합] "
+                        f"rtc: {len(rtc_sheets)}시트 / sm: {len(sm_sheets)}시트 "
+                        f"(시트: {list(cleaned_sheets.keys())})"
+                    )
+                else:
+                    local_cost_driver_dfs[matched_keyword] = cleaned_sheets
+                    st.success(
+                        f"✅ {file.name} → [{matched_keyword}] "
+                        f"선택된 시트: {list(cleaned_sheets.keys())}"
+                    )
+            else:
+                if sheet_rule == "settlement" and settlement_candidates:
                     st.warning(
-                        f"⚠️ {file.name}: 시트명에 '{needle}' 가 포함된 시트를 찾을 수 없습니다. "
+                        f"⚠️ {file.name}: 결산연도-월"
+                        f"({settlement_year}-{int(settlement_month):02d}) "
+                        f"에 해당하는 시트를 찾을 수 없습니다. "
                         f"파일에 있는 시트: {all_sheet_names}"
                     )
-                    continue
-                st.warning(
-                    f"⚠️ {file.name}: 시트명이 '{sheet_rule}' 로 시작하는 시트가 없습니다. "
-                    f"파일에 있는 시트: {all_sheet_names}"
-                )
+                elif isinstance(sheet_rule, str) and sheet_rule not in ("all", "settlement"):
+                    if sheet_rule.startswith("contains:"):
+                        needle = sheet_rule.split(":", 1)[1].strip()
+                        st.warning(
+                            f"⚠️ {file.name}: 시트명에 '{needle}' 가 포함된 시트를 찾을 수 없습니다. "
+                            f"파일에 있는 시트: {all_sheet_names}"
+                        )
+                        continue
+                    st.warning(
+                        f"⚠️ {file.name}: 시트명이 '{sheet_rule}' 로 시작하는 시트가 없습니다. "
+                        f"파일에 있는 시트: {all_sheet_names}"
+                    )
+
+        return local_cost_driver_dfs
+
+    cost_driver_dfs = _memoize(
+        "cost_driver_upload",
+        (_files_fingerprint(uploaded_files), settlement_year, settlement_month),
+        _compute_cost_driver_dfs,
+    )
 
     if cost_driver_dfs:
         with st.expander("원가동인 데이터 확인 (선택된 시트만 표시)"):
@@ -1252,8 +1328,14 @@ def render_combined_cost_driver(
     cost_driver_dfs, settlement_year=None, settlement_month=None, product_id_df=None,
 ):
     """통합 원가동인 DataFrame 표시."""
-    combined_df = build_combined_cost_driver_df(
-        cost_driver_dfs, settlement_year, settlement_month, product_id_df,
+    # cost_driver_dfs 는 시트별 df 를 담은 중첩 dict라 내용 기반 지문이 얕아질 수 있어,
+    # (업스트림에서 파일이 안 바뀌면 같은 dict 객체를 그대로 재사용하는 점을 이용해) id() 로 식별.
+    combined_df = _memoize(
+        "combined_cost_driver",
+        (id(cost_driver_dfs), product_id_df, settlement_year, settlement_month),
+        lambda: build_combined_cost_driver_df(
+            cost_driver_dfs, settlement_year, settlement_month, product_id_df,
+        ),
     )
     if combined_df.empty:
         return combined_df
@@ -1304,19 +1386,27 @@ def render_verification_sheet_upload():
     if uploaded_file is None:
         return None
 
-    try:
-        # header=0 → 1번째 행이 컬럼명
-        sheets = pd.read_excel(uploaded_file, sheet_name=None, header=0)
-    except Exception as exc:
-        st.error(f"{uploaded_file.name} 처리 중 오류: {exc}")
-        return None
+    def _compute_verification_sheets():
+        try:
+            # header=0 → 1번째 행이 컬럼명
+            sheets = pd.read_excel(uploaded_file, sheet_name=None, header=0)
+        except Exception as exc:
+            st.error(f"{uploaded_file.name} 처리 중 오류: {exc}")
+            return None
 
-    # 시트가 여러 개일 수 있으니 dict 형태로 반환
-    cleaned_sheets = {}
-    for sheet_name, df in sheets.items():
-        df.columns = [str(c).strip() for c in df.columns]
-        df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
-        cleaned_sheets[sheet_name] = df
+        # 시트가 여러 개일 수 있으니 dict 형태로 반환
+        local_cleaned_sheets = {}
+        for sheet_name, df in sheets.items():
+            df.columns = [str(c).strip() for c in df.columns]
+            df = df.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+            local_cleaned_sheets[sheet_name] = df
+        return local_cleaned_sheets
+
+    cleaned_sheets = _memoize(
+        "verification_sheet_upload",
+        (_files_fingerprint([uploaded_file]),),
+        _compute_verification_sheets,
+    )
 
     if cleaned_sheets:
         with st.expander("검증시트 데이터 확인"):
@@ -1394,7 +1484,10 @@ def render_final_cost(
 
     st.download_button(
         "차량별 원가 다운로드",
-        data=dataframe_to_excel_bytes(final_cost_df, sheet_name="차량별원가"),
+        data=_memoize(
+            "final_cost_draft_download", (id(final_cost_df),),
+            lambda: dataframe_to_excel_bytes(final_cost_df, sheet_name="차량별원가"),
+        ),
         file_name="final_cost_draft.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
@@ -1535,9 +1628,11 @@ def save_final_master(final_cost_df):
     return saved_at, len(merged), len(final_cost_df), replaced
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def _read_master_excel_cached(path, mtime):
-    """엑셀 마스터 읽기 (파일 수정시각 mtime 을 캐시 키로 사용)."""
+    """엑셀 마스터 읽기 (파일 수정시각 mtime 을 캐시 키로 사용).
+
+    max_entries 를 작게 유지해 큰 마스터 DataFrame 버전이 서버 메모리에 계속 쌓이지 않게 함."""
     try:
         return pd.read_excel(path, sheet_name="최종원가마스터")
     except Exception:
@@ -1824,7 +1919,11 @@ def _render_accounting_table(title, table, highlight_rows):
     row_height_px = 35
     header_height_px = 65  # 멀티헤더 2줄 + 여유
     total_height = header_height_px + row_height_px * len(table) + 10  # 하단 여유
-    st.dataframe(styler, use_container_width=True, height=total_height)
+    # 표끼리(상품(자동차) 수불 / 상품(위탁) 수불) 라벨 폭이 달라 월 컬럼 경계가 어긋나지 않도록 고정
+    st.dataframe(
+        styler, use_container_width=True, height=total_height,
+        column_config={"_index": st.column_config.Column(width=170)},
+    )
 
 
 def render_accounting_section(master_df=None):
@@ -1834,6 +1933,24 @@ def render_accounting_section(master_df=None):
     if master_df is None or master_df.empty:
         st.info("최종 원가 마스터가 저장되면 회계처리 표가 채워집니다.")
         return
+
+    if "회계연도" in master_df.columns:
+        available_years = sorted(
+            pd.to_numeric(master_df["회계연도"], errors="coerce").dropna().astype(int).unique().tolist(),
+            reverse=True,
+        )
+        if available_years:
+            _year_col, _ = st.columns([1, 3])
+            with _year_col:
+                selected_year = st.selectbox(
+                    "회계연도", available_years, key="accounting_section_year",
+                )
+            master_df = master_df[
+                pd.to_numeric(master_df["회계연도"], errors="coerce") == selected_year
+            ]
+            if master_df.empty:
+                st.info(f"{selected_year}년 데이터가 없습니다.")
+                return
 
     tables = _compute_accounting_tables(master_df)
     # 강조행: 소계/합계 (행 위치 기준)
@@ -1849,6 +1966,42 @@ tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])
 
 with tab1:
     master_df, master_saved_at = load_final_master()
+
+    if master_df is not None:
+        if not master_saved_at:
+            try:
+                _latest_path = _cost_summary_builder._find_latest_cost_summary_path()
+                if _latest_path is not None:
+                    master_saved_at = datetime.fromtimestamp(
+                        _os.path.getmtime(_latest_path)
+                    ).strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                pass
+
+        col_space, col_btn = st.columns([8, 2])
+        with col_btn:
+            if st.button(
+                "🗑️ 전체 데이터 초기화", type="primary", use_container_width=True,
+                key="cost_reset_button",
+            ):
+                st.session_state['cost_delete_confirm'] = True
+
+            st.markdown(
+                f"<p style='text-align: right; color: gray; font-size: 0.75rem; margin-top: -10px;'>* 최근 업데이트: {master_saved_at or '-'}</p>",
+                unsafe_allow_html=True
+            )
+
+        if st.session_state.get('cost_delete_confirm'):
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("✅ 삭제", use_container_width=True, key="cost_reset_confirm"):
+                    delete_final_master()
+                    st.session_state['cost_delete_confirm'] = False
+                    st.rerun()
+            with c2:
+                if st.button("❌ 취소", use_container_width=True, key="cost_reset_cancel"):
+                    st.session_state['cost_delete_confirm'] = False
+                    st.rerun()
 
     # 회계처리 (먼저)
     render_accounting_section(master_df)
@@ -1946,7 +2099,12 @@ with tab1:
         with col_dl:
             st.download_button(
                 "다운로드",
-                data=_build_monthly_split_excel_bytes(master_df),
+                # master_df 가 안 바뀐 채(id로 식별) 리런될 때마다 전체 워크북을 다시 만들지 않도록 캐싱
+                # (재생성 자체가 메모리를 크게 잡아먹는 작업이라 불필요한 리런에서는 건너뜀)
+                data=_memoize(
+                    "view_master_download", (id(master_df),),
+                    lambda: _build_monthly_split_excel_bytes(master_df),
+                ),
                 file_name=f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="master_download_top",
@@ -1956,10 +2114,6 @@ with tab1:
     if master_df is None:
         st.info("저장된 최종 원가 마스터가 없습니다. UPLOAD 탭에서 생성 후 '최종 마스터 저장'을 눌러주세요.")
     else:
-        if master_saved_at:
-            st.caption(f"마지막 저장: {master_saved_at}")
-        st.write(f"건수: {len(master_df):,}건")
-
         # 화면: 회계월별 탭 분리 (오름차순)
         if ym_pairs:
             tab_labels = [f"{y}-{m:02d}" for y, m in ym_pairs]
@@ -1974,24 +2128,6 @@ with tab1:
                     st.dataframe(dataframe_for_display(sub), use_container_width=True)
         else:
             st.dataframe(dataframe_for_display(master_df), use_container_width=True)
-
-        # 데이터 초기화 (저장본 삭제)
-        with st.expander("⚠️ 데이터 초기화"):
-            st.caption("저장된 원가 데이터를 삭제합니다. 이 작업은 되돌릴 수 없습니다.")
-            confirm_reset = st.checkbox(
-                "삭제를 확인합니다", key="confirm_master_reset"
-            )
-            if st.button(
-                "데이터 초기화",
-                key="reset_master",
-                type="secondary",
-                disabled=not confirm_reset,
-            ):
-                if delete_final_master():
-                    st.success("원가 데이터가 초기화되었습니다.")
-                    st.rerun()
-                else:
-                    st.warning("삭제할 데이터가 없습니다.")
 
 with tab2:
     settlement_year, settlement_month = render_settlement_selector()

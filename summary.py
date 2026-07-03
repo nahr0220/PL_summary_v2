@@ -48,9 +48,11 @@ def _build_sales_division_id(sales_type_series, product_id_series):
     return st_clean + "_" + id_clean
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, max_entries=2)
 def _read_excel_cached(path, mtime, sheet_name=None):
-    """파일 수정시간을 캐시 키에 포함해 같은 엑셀 반복 읽기를 줄인다."""
+    """파일 수정시간을 캐시 키에 포함해 같은 엑셀 반복 읽기를 줄인다.
+
+    max_entries 를 작게 유지해 큰 DataFrame 버전이 서버 메모리에 계속 쌓이지 않게 함."""
     if sheet_name is None:
         return pd.read_excel(path)
     return pd.read_excel(path, sheet_name=sheet_name)
@@ -328,31 +330,21 @@ with tab1:
                     merged_df['소/도매'], categories=order, ordered=True
                 )
 
-                def style_dataframe(df):
-                    return df.style.format(
-                        lambda x: '-' if x == 0 else f"{x:,.0f}"
-                    ).set_properties(**{'text-align': 'right', 'font-size': '13px'}).apply(
-                        lambda x: [
-                            'background-color: #e6f3ff; font-weight: bold; border-top: 2px solid #004c99'
-                            if (x.name[0] == '전체' or x.name == '합계(전체)') else ''
-                            for _ in x
-                        ],
-                        axis=1,
-                    )
-
                 if not merged_df.empty:
-                    if hasattr(st, "toggle"):
-                        show_per_unit_only = st.toggle(
-                            "대당으로 보기",
-                            value=False,
-                            key="summary_show_per_unit_only",
-                        )
-                    else:
-                        show_per_unit_only = st.checkbox(
-                            "대당으로 보기",
-                            value=False,
-                            key="summary_show_per_unit_only",
-                        )
+                    _toggle_l, _toggle_r = st.columns([9, 1])
+                    with _toggle_r:
+                        if hasattr(st, "toggle"):
+                            show_per_unit_only = st.toggle(
+                                "대당으로 보기",
+                                value=False,
+                                key="summary_show_per_unit_only",
+                            )
+                        else:
+                            show_per_unit_only = st.checkbox(
+                                "대당으로 보기",
+                                value=False,
+                                key="summary_show_per_unit_only",
+                            )
 
                     def _amount_caption(label):
                         if show_per_unit_only:
@@ -362,6 +354,86 @@ with tab1:
                     def _summary_table_height(df, row_height=35, header_height=38):
                         """Set monthly summary table height to show all rows."""
                         return int(header_height + row_height * len(df) + 4)
+
+                    # 월별 표들(판매대수/매출/매출원가/매출총이익/매출총이익률) 사이에
+                    # 월(1~12월/연간 총합) 컬럼 경계선이 서로 일치하도록 폭을 통일한다.
+                    _MONTH_TABLE_LABEL_WIDTH = 170
+                    _MONTH_TABLE_DATA_WIDTH = 95
+                    _MONTH_TABLE_INDENT = "    "
+
+                    def _month_table_column_config(data_columns):
+                        cfg = {"구분": st.column_config.Column(width=_MONTH_TABLE_LABEL_WIDTH)}
+                        for col in data_columns:
+                            cfg[col] = st.column_config.Column(width=_MONTH_TABLE_DATA_WIDTH)
+                        return cfg
+
+                    def _flatten_dense_multiindex(df, top_label='전체'):
+                        """(대분류, 소도매) 2단 인덱스 → '구분' 컬럼 하나로 합친 flat df.
+                        소도매가 공백(소계 행)이거나 top_label(전체) 이면 대분류만, 그 외엔 들여쓴 소도매만 표시."""
+                        labels = []
+                        highlight_positions = set()
+                        for pos, (l0, l1) in enumerate(df.index):
+                            l0s, l1s = str(l0).strip(), str(l1).strip()
+                            if l0s == top_label:
+                                labels.append(l0s)
+                                highlight_positions.add(pos)
+                            elif not l1s:
+                                labels.append(l0s)
+                            else:
+                                labels.append(_MONTH_TABLE_INDENT + l1s)
+                        flat = df.reset_index(drop=True)
+                        flat.insert(0, '구분', labels)
+                        return flat, highlight_positions
+
+                    def _flatten_sparse_labels(raw_tuples):
+                        """레벨 중 값이 있는 가장 깊은 레벨만, 그 깊이만큼 들여써서 한 줄 라벨로."""
+                        labels = []
+                        for t in raw_tuples:
+                            depth, text = 0, ""
+                            for i, v in enumerate(t):
+                                vs = str(v).strip()
+                                if vs:
+                                    depth, text = i, vs
+                            labels.append(_MONTH_TABLE_INDENT * depth + text)
+                        return labels
+
+                    def _render_month_table(title, unit_caption, flat_df, highlight_positions, numeric_format=None):
+                        """'구분' + 월별 데이터 컬럼인 flat_df 를 모든 월별 표와 동일한 컬럼 폭으로 렌더링."""
+                        data_columns = [c for c in flat_df.columns if c != '구분']
+                        style_df = pd.DataFrame("", index=flat_df.index, columns=flat_df.columns)
+                        for r in range(len(flat_df)):
+                            row_style = (
+                                "background-color: #e6f3ff; font-weight: bold; border-top: 2px solid #004c99;"
+                                if r in highlight_positions else ""
+                            )
+                            style_df.iloc[r, :] = row_style
+
+                        styler = flat_df.style
+                        if numeric_format is not None:
+                            styler = styler.format(numeric_format, subset=data_columns)
+                        styler = (
+                            styler
+                            .set_properties(subset=data_columns, **{'text-align': 'right', 'font-size': '13px'})
+                            .set_properties(subset=['구분'], **{'text-align': 'left', 'font-size': '13px', 'white-space': 'pre'})
+                            .apply(lambda _: style_df, axis=None)
+                        )
+
+                        st.markdown(
+                            f"""
+                            <div style="display:flex; justify-content:space-between; align-items:flex-end;">
+                                <div style="font-size:20px; font-weight:bold;">{title}</div>
+                                <div style="font-size:12px; color:gray;">{unit_caption}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+                        st.dataframe(
+                            styler,
+                            use_container_width=True,
+                            hide_index=True,
+                            height=_summary_table_height(flat_df),
+                            column_config=_month_table_column_config(data_columns),
+                        )
 
                     # 1. 월별 판매 대수 (상품/위탁 × 소/도매)
                     s_p = merged_df.pivot_table(
@@ -377,19 +449,10 @@ with tab1:
                     s_p = pd.concat([s_p, subtotals_s]).sort_index()
                     s_p.loc[('전체', '총 판매대수'), :] = subtotals_s.sum(axis=0).values
 
-                    st.markdown(
-                        """
-                        <div style="display:flex; justify-content:space-between; align-items:flex-end;">
-                            <div style="font-size:20px; font-weight:bold;">월별 판매 대수</div>
-                            <div style="font-size:12px; color:gray;">(단위: 대)</div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                    st.dataframe(
-                        style_dataframe(s_p),
-                        use_container_width=True,
-                        height=_summary_table_height(s_p),
+                    flat_s_p, hl_s_p = _flatten_dense_multiindex(s_p)
+                    _render_month_table(
+                        "월별 판매 대수", "(단위: 대)", flat_s_p, hl_s_p,
+                        numeric_format=lambda x: '-' if x == 0 else f"{x:,.0f}",
                     )
 
                     # 2. 월별 매출 (상품매출 / 용역매출 × 소/도매)
@@ -447,33 +510,9 @@ with tab1:
                                     pu = 0
                                 combined.loc[idx, col] = _fmt_cell(amt, pu)
 
-                        # 합계 행만 강조 (위 표와 동일 스타일)
-                        def _style_combined(df):
-                            return df.style.set_properties(**{
-                                'text-align': 'right',
-                                'font-size': '13px',
-                            }).apply(
-                                lambda x: [
-                                    'background-color: #e6f3ff; font-weight: bold; border-top: 2px solid #004c99'
-                                    if (x.name[0] == '전체' or x.name == '합계(전체)') else ''
-                                    for _ in x
-                                ],
-                                axis=1,
-                            )
-
-                        st.markdown(
-                            f"""
-                            <div style="display:flex; justify-content:space-between; align-items:flex-end;">
-                                <div style="font-size:20px; font-weight:bold;">월별 매출</div>
-                                <div style="font-size:12px; color:gray;">{_amount_caption("대당 매출")}</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-                        st.dataframe(
-                            _style_combined(combined),
-                            use_container_width=True,
-                            height=_summary_table_height(combined),
+                        flat_combined, hl_combined = _flatten_dense_multiindex(combined)
+                        _render_month_table(
+                            "월별 매출", _amount_caption("대당 매출"), flat_combined, hl_combined,
                         )
 
                         # 임시 컬럼 정리
@@ -581,36 +620,10 @@ with tab1:
                             i for i, t in enumerate(raw_tuples) if t[0] in ('상품판매', '위탁판매', '합계')
                         )
 
-                        # 위치 기반 스타일 매트릭스 (중복 라벨 대응)
-                        n_rows = len(cost_df)
-                        n_cols = len(cost_df.columns)
-                        style_df = pd.DataFrame("", index=cost_df.index, columns=cost_df.columns)
-                        for r_pos in range(n_rows):
-                            if r_pos in highlight_positions:
-                                row_style = "background-color: #e6f3ff; font-weight: bold; border-top: 2px solid #004c99;"
-                            else:
-                                row_style = ""
-                            for c_pos in range(n_cols):
-                                style_df.iat[r_pos, c_pos] = row_style
-
-                        cost_styler = cost_df.style.set_properties(**{
-                            'text-align': 'right',
-                            'font-size': '13px',
-                        }).apply(lambda _: style_df, axis=None)
-
-                        st.markdown(
-                            f"""
-                            <div style="display:flex; justify-content:space-between; align-items:flex-end;">
-                                <div style="font-size:20px; font-weight:bold;">월별 매출원가</div>
-                                <div style="font-size:12px; color:gray;">{_amount_caption("대당")}</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-                        st.dataframe(
-                            cost_styler,
-                            use_container_width=True,
-                            height=_summary_table_height(cost_df),
+                        flat_cost_df = cost_df.reset_index(drop=True)
+                        flat_cost_df.insert(0, '구분', _flatten_sparse_labels(raw_tuples))
+                        _render_month_table(
+                            "월별 매출원가", _amount_caption("대당"), flat_cost_df, highlight_positions,
                         )
 
                         # ===== 월별 매출총이익 = 월별 매출 - 월별 매출원가 =====
@@ -673,33 +686,10 @@ with tab1:
                         gp_highlight = set(
                             i for i, t in enumerate(raw_gp) if t[0] in ('상품판매', '위탁판매', '합계')
                         )
-                        gp_style_df = pd.DataFrame("", index=gp_df.index, columns=gp_df.columns)
-                        for r_pos in range(len(gp_df)):
-                            row_style = (
-                                "background-color: #e6f3ff; font-weight: bold; border-top: 2px solid #004c99;"
-                                if r_pos in gp_highlight else ""
-                            )
-                            for c_pos in range(len(gp_df.columns)):
-                                gp_style_df.iat[r_pos, c_pos] = row_style
-
-                        gp_styler = gp_df.style.set_properties(**{
-                            'text-align': 'right',
-                            'font-size': '13px',
-                        }).apply(lambda _: gp_style_df, axis=None)
-
-                        st.markdown(
-                            f"""
-                            <div style="display:flex; justify-content:space-between; align-items:flex-end;">
-                                <div style="font-size:20px; font-weight:bold;">월별 매출총이익</div>
-                                <div style="font-size:12px; color:gray;">{_amount_caption("대당 매출총이익")}</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-                        st.dataframe(
-                            gp_styler,
-                            use_container_width=True,
-                            height=_summary_table_height(gp_df),
+                        flat_gp_df = gp_df.reset_index(drop=True)
+                        flat_gp_df.insert(0, '구분', _flatten_sparse_labels(raw_gp))
+                        _render_month_table(
+                            "월별 매출총이익", _amount_caption("대당 매출총이익"), flat_gp_df, gp_highlight,
                         )
 
                         # ===== 월별 매출총이익률 = 매출총이익 / 매출 × 100 (%) =====
@@ -755,33 +745,10 @@ with tab1:
                         gpr_highlight = set(
                             i for i, t in enumerate(raw_gpr) if t[0] in ('상품판매', '위탁판매', '합계')
                         )
-                        gpr_style_df = pd.DataFrame("", index=gpr_df.index, columns=gpr_df.columns)
-                        for r_pos in range(len(gpr_df)):
-                            row_style = (
-                                "background-color: #e6f3ff; font-weight: bold; border-top: 2px solid #004c99;"
-                                if r_pos in gpr_highlight else ""
-                            )
-                            for c_pos in range(len(gpr_df.columns)):
-                                gpr_style_df.iat[r_pos, c_pos] = row_style
-
-                        gpr_styler = gpr_df.style.set_properties(**{
-                            'text-align': 'right',
-                            'font-size': '13px',
-                        }).apply(lambda _: gpr_style_df, axis=None)
-
-                        st.markdown(
-                            """
-                            <div style="display:flex; justify-content:space-between; align-items:flex-end;">
-                                <div style="font-size:20px; font-weight:bold;">월별 매출총이익률</div>
-                                <div style="font-size:12px; color:gray;">(매출총이익 ÷ 매출 × 100)</div>
-                            </div>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-                        st.dataframe(
-                            gpr_styler,
-                            use_container_width=True,
-                            height=_summary_table_height(gpr_df),
+                        flat_gpr_df = gpr_df.reset_index(drop=True)
+                        flat_gpr_df.insert(0, '구분', _flatten_sparse_labels(raw_gpr))
+                        _render_month_table(
+                            "월별 매출총이익률", "(매출총이익 ÷ 매출 × 100)", flat_gpr_df, gpr_highlight,
                         )
 
                 st.divider()

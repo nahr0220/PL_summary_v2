@@ -8,6 +8,39 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
 
+
+def _files_fingerprint(files):
+    """업로드 파일(들)의 지문. 내용 대신 file_id/이름/크기만 사용(가볍고 충분히 유일함)."""
+    if files is None:
+        return ()
+    if not isinstance(files, (list, tuple)):
+        files = [files]
+    return tuple(
+        (getattr(f, "file_id", None), getattr(f, "name", None), getattr(f, "size", None))
+        for f in files
+    )
+
+
+def _memoize(cache_name, fingerprint, compute_fn):
+    """fingerprint 가 이전 호출과 같으면 session_state 에 저장된 결과를 재사용.
+
+    Streamlit 은 위젯 조작마다 스크립트 전체를 재실행하므로, 필터 등 관련 없는 위젯을
+    건드렸을 때도 업로드 파일을 매번 재파싱하지 않도록 하기 위함.
+    """
+    cache_key = f"_memo_{cache_name}"
+    cached = st.session_state.get(cache_key)
+    if cached is not None and cached.get("fingerprint") == fingerprint:
+        return cached["result"]
+    result = compute_fn()
+    st.session_state[cache_key] = {"fingerprint": fingerprint, "result": result}
+    return result
+
+
+@st.cache_data(show_spinner=False, max_entries=2)
+def _read_master_pnl_cached(path, mtime):
+    """master_pnl.xlsx 읽기 (mtime 을 캐시 키로 사용) — VIEW 탭 리런마다 재파싱하지 않도록 함."""
+    return pd.read_excel(path)
+
 def mask_value(value):
     # 값이 없거나 NaN인 경우 빈 문자열 처리
     val_str = str(value).strip() if pd.notna(value) and str(value).strip() != "" else ""
@@ -167,8 +200,8 @@ tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])
 with tab1:  # VIEW (매출요약정보)
     master_file = "master_pnl.xlsx"
     if os.path.exists(master_file) and os.path.getsize(master_file) > 0:
-        
-        master_df = pd.read_excel(master_file)
+
+        master_df = _read_master_pnl_cached(master_file, os.path.getmtime(master_file))
 
         # ✅ 최근 업데이트 시간 (데이터 내 컬럼 혹은 파일 시스템의 수정 시간 기준)
         try:
@@ -207,10 +240,51 @@ with tab1:  # VIEW (매출요약정보)
         order = ['소매', '도매']
         master_df['소/도매'] = pd.Categorical(master_df['소/도매'], categories=order, ordered=True)
 
-        def style_dataframe(df):
-            return df.style.format(lambda x: '-' if x == 0 else f"{x:,.0f}").set_properties(**{'text-align': 'right', 'font-size': '13px'}) \
-                .apply(lambda x: ['background-color: #e6f3ff; font-weight: bold; border-top: 2px solid #004c99' 
-                                  if (x.name[0] == '전체' or x.name == '합계(전체)') else '' for _ in x], axis=1)
+        # 월별 판매 대수 / 월별 매출 표끼리 월(1~12월/연간 총합) 컬럼 경계선이 일치하도록 폭 통일
+        _MONTH_TABLE_LABEL_WIDTH = 170
+        _MONTH_TABLE_DATA_WIDTH = 95
+        _MONTH_TABLE_INDENT = "    "
+
+        def _month_table_column_config(data_columns):
+            cfg = {"구분": st.column_config.Column(width=_MONTH_TABLE_LABEL_WIDTH)}
+            for col in data_columns:
+                cfg[col] = st.column_config.Column(width=_MONTH_TABLE_DATA_WIDTH)
+            return cfg
+
+        def _flatten_dense_multiindex(df, top_label='전체'):
+            """(대분류, 소도매) 2단 인덱스 → '구분' 컬럼 하나로 합친 flat df.
+            소도매가 공백(소계 행)이면 대분류만, top_label(전체)이면 대분류만(강조), 그 외엔 들여쓴 소도매만 표시."""
+            labels = []
+            highlight_positions = set()
+            for pos, (l0, l1) in enumerate(df.index):
+                l0s, l1s = str(l0).strip(), str(l1).strip()
+                if l0s == top_label:
+                    labels.append(l0s)
+                    highlight_positions.add(pos)
+                elif not l1s:
+                    labels.append(l0s)
+                else:
+                    labels.append(_MONTH_TABLE_INDENT + l1s)
+            flat = df.reset_index(drop=True)
+            flat.insert(0, '구분', labels)
+            return flat, highlight_positions
+
+        def style_dataframe(flat_df, highlight_positions):
+            data_columns = [c for c in flat_df.columns if c != '구분']
+            style_df = pd.DataFrame("", index=flat_df.index, columns=flat_df.columns)
+            for r in range(len(flat_df)):
+                row_style = (
+                    'background-color: #e6f3ff; font-weight: bold; border-top: 2px solid #004c99'
+                    if r in highlight_positions else ''
+                )
+                style_df.iloc[r, :] = row_style
+            return (
+                flat_df.style
+                .format(lambda x: '-' if x == 0 else f"{x:,.0f}", subset=data_columns)
+                .set_properties(subset=data_columns, **{'text-align': 'right', 'font-size': '13px'})
+                .set_properties(subset=['구분'], **{'text-align': 'left', 'font-size': '13px', 'white-space': 'pre'})
+                .apply(lambda _: style_df, axis=None)
+            )
 
         if not master_df.empty:
             # 1. 기존 데이터 피벗 (상품/위탁, 소/도매 기준)
@@ -238,7 +312,13 @@ with tab1:  # VIEW (매출요약정보)
                 </div>
                 """, unsafe_allow_html=True)
 
-            st.dataframe(style_dataframe(s_p), use_container_width=True)
+            flat_s_p, hl_s_p = _flatten_dense_multiindex(s_p)
+            st.dataframe(
+                style_dataframe(flat_s_p, hl_s_p),
+                use_container_width=True,
+                hide_index=True,
+                column_config=_month_table_column_config([c for c in flat_s_p.columns if c != '구분']),
+            )
 
             # 1. 기존 데이터 처리 (Melt & Pivot)
             rev = master_df.melt(id_vars=['소/도매', '판매월'], value_vars=['상품매출', '용역매출'], var_name='매출항목', value_name='금액')
@@ -264,7 +344,13 @@ with tab1:  # VIEW (매출요약정보)
                 </div>
                 """, unsafe_allow_html=True)
 
-            st.dataframe(style_dataframe(r_p), use_container_width=True)
+            flat_r_p, hl_r_p = _flatten_dense_multiindex(r_p)
+            st.dataframe(
+                style_dataframe(flat_r_p, hl_r_p),
+                use_container_width=True,
+                hide_index=True,
+                column_config=_month_table_column_config([c for c in flat_r_p.columns if c != '구분']),
+            )
 
         head_v_l, head_v_r = st.columns([8, 2])
         with head_v_l:
@@ -305,7 +391,12 @@ with tab1:  # VIEW (매출요약정보)
         st.dataframe(d_df[display_cols], use_container_width=True)
         dl_slot_view.download_button(
             "엑셀 다운로드",
-            to_excel_with_format(d_df[display_cols], highlight_after_col=">>컬럼구분>>"),
+            # 마스터 파일·필터가 안 바뀌면 재생성하지 않음 (전체 워크북 생성은 메모리를 꽤 씀)
+            _memoize(
+                "view_sales_download",
+                (os.path.getmtime(master_file), tuple(sorted(s_yrs)), tuple(sorted(s_mths))),
+                lambda: to_excel_with_format(d_df[display_cols], highlight_after_col=">>컬럼구분>>"),
+            ),
             f"sales_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
             use_container_width=True
         )
@@ -346,7 +437,11 @@ with tab2: # UPLOAD
     with col_v: v_file = st.file_uploader("업로드 파일 ㅣ 기간별손익계산서", type=["xls", "xlsx"])
 
     if u_files and base_file:
-        merged_df = preprocess_sales_data(u_files, base_df)
+        merged_df = _memoize(
+            "merged_sales_df",
+            (_files_fingerprint(u_files), _files_fingerprint(base_file)),
+            lambda: preprocess_sales_data(u_files, base_df),
+        )
         st.session_state['merged_df'] = merged_df
 
         # 1. 판매연도, 판매월 필터 (기본 필터링)
@@ -366,7 +461,12 @@ with tab2: # UPLOAD
 
         dl_slot_account.download_button(
             label="엑셀 다운로드",
-            data=to_excel_with_format(final_df, highlight_after_col="회계연도"), # 원본merged_df가 아닌 final_df 전달
+            # merged_df 가 안 바뀐 채(id 로 식별) 같은 필터가 다시 선택된 경우 재생성 방지
+            data=_memoize(
+                "account_ledger_excel",
+                (id(merged_df), tuple(sorted(sel_year)), tuple(sorted(sel_month)), tuple(sorted(sel_acc))),
+                lambda: to_excel_with_format(final_df, highlight_after_col="회계연도"),
+            ), # 원본merged_df가 아닌 final_df 전달
             file_name=f"sales_data_by_account_{datetime.now().strftime('%Y%m%d')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
@@ -425,7 +525,11 @@ with tab2: # UPLOAD
 
             dl_slot_final.download_button(
                 label="엑셀 다운로드",
-                data=to_excel_with_format(f_df, highlight_after_col=">>컬럼구분>>"),
+                # f_df 가 안 바뀐 채(id 로 식별) 리런될 때 재생성 방지
+                data=_memoize(
+                    "final_report_excel", id(f_df),
+                    lambda: to_excel_with_format(f_df, highlight_after_col=">>컬럼구분>>"),
+                ),
                 file_name=f"sales_summary(확인용)_{datetime.now().strftime('%Y%m%d')}.xlsx",
                 use_container_width=True
             )

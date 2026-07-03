@@ -297,11 +297,31 @@ def _normal_inbound_mask(final_df):
 
 # ----- 엑셀 출력 -----
 
+# 컬럼명에 이 키워드가 포함되면 숫자 서식(#,##0 등)을 적용하지 않음 (연도에 천단위 콤마 방지)
+_YEAR_COLUMN_KEYWORDS = ("연도", "년도")
+
+
+def _is_year_column(column_name):
+    return any(kw in str(column_name) for kw in _YEAR_COLUMN_KEYWORDS)
+
+
+def _apply_year_column_plain_format(worksheet, df):
+    """연도/년도 가 포함된 컬럼은 천단위 콤마 없는 일반 숫자 서식으로 고정."""
+    for col_idx, column_name in enumerate(df.columns, start=1):
+        if not _is_year_column(column_name):
+            continue
+        for row_offset in range(len(df)):
+            cell = worksheet.cell(row=2 + row_offset, column=col_idx)
+            if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+                cell.number_format = "0"
+
+
 def dataframe_to_excel_bytes(df, sheet_name="Sheet1"):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name=sheet_name)
         _apply_excel_column_group_styles(writer.sheets[sheet_name], df)
+        _apply_year_column_plain_format(writer.sheets[sheet_name], df)
     output.seek(0)
     return output.getvalue()
 
@@ -400,6 +420,7 @@ def workbook_to_excel_bytes(sheet_dfs):
         for sheet_name, df in sheet_dfs.items():
             safe_sheet_name = _safe_excel_sheet_name(sheet_name, used_sheet_names)
             df.to_excel(writer, index=False, sheet_name=safe_sheet_name)
+            _apply_year_column_plain_format(writer.sheets[safe_sheet_name], df)
     output.seek(0)
     return output.getvalue()
 
@@ -455,6 +476,12 @@ def dataframe_for_display(df):
     display_df = df.copy()
     display_df.columns = [str(column) for column in display_df.columns]
     for column in display_df.columns:
+        # 연도/년도 컬럼: 숫자형이면 문자열로 바꿔 화면에서 천단위 콤마가 붙지 않게 함
+        if _is_year_column(column) and pd.api.types.is_numeric_dtype(display_df[column]):
+            display_df[column] = display_df[column].apply(
+                lambda v: "" if pd.isna(v) else str(int(v))
+            )
+            continue
         # datetime 컬럼: 시간이 전부 00:00:00 이면 날짜만(YYYY-MM-DD) 표시
         if pd.api.types.is_datetime64_any_dtype(display_df[column]):
             series = display_df[column]

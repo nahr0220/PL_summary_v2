@@ -1546,17 +1546,14 @@ def _find_latest_cost_summary_path():
 
 
 def _read_existing_master_df():
-    """최신 cost_summary_*.xlsx 를 읽어 반환 (없으면 None)."""
+    """최신 cost_summary_*.xlsx 를 읽어 반환 (없으면 None).
+
+    cost_summary_builder 의 캐시된 리더를 재사용 — 같은 파일을 또 다른 독립 경로로
+    (openpyxl 재파싱해서) 중복으로 읽지 않도록 함."""
     path = _find_latest_cost_summary_path()
     if path is None:
         return None
-    try:
-        return pd.read_excel(path, sheet_name="최종원가마스터")
-    except Exception:
-        try:
-            return pd.read_excel(path)
-        except Exception:
-            return None
+    return _cost_summary_builder._read_master_df(path)
 
 
 def _accumulate_master_data(existing_df, new_df):
@@ -2103,10 +2100,11 @@ with tab1:
         with col_dl:
             st.download_button(
                 "다운로드",
-                # master_df 가 안 바뀐 채(id로 식별) 리런될 때마다 전체 워크북을 다시 만들지 않도록 캐싱
-                # (재생성 자체가 메모리를 크게 잡아먹는 작업이라 불필요한 리런에서는 건너뜀)
+                # 마스터 파일이 안 바뀌면(경로+mtime로 식별) 전체 워크북을 다시 만들지 않도록 캐싱.
+                # master_df 자체는 st.cache_data 를 거치며 매 호출마다 deep-copy 되어 id()가 매번
+                # 달라지므로, id(master_df) 대신 파일의 (경로, mtime)을 지문으로 사용해야 실제로 캐싱됨.
                 data=_memoize(
-                    "view_master_download", (id(master_df),),
+                    "view_master_download", _master_file_state() or (None, None),
                     lambda: _build_monthly_split_excel_bytes(master_df),
                 ),
                 file_name=f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",

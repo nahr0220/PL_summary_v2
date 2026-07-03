@@ -428,13 +428,19 @@ with tab2: # UPLOAD
     st.markdown('<div style="font-size:20px; font-weight:bold;">판매차량</div>', unsafe_allow_html=True)
     base_file = st.file_uploader("업로드 파일 ㅣ 총 1개 파일 ㅣ 손익분석", type=["xlsx"], key="base")
     if base_file:
-        base_df = pd.read_excel(base_file)
-        base_df["판매일자"] = pd.to_datetime(base_df["판매일자"])
-        base_df["판매연도"] = base_df["판매일자"].dt.year
-        base_df["판매월"] = base_df["판매일자"].dt.month
-        cols = [c for c in base_df.columns if c != '판매월'] + ['판매월']
-        base_df = base_df[cols]
-        base_df["판매일자"] = pd.to_datetime(base_df["판매일자"]).dt.date
+        def _compute_base_df():
+            df = pd.read_excel(base_file)
+            df["판매일자"] = pd.to_datetime(df["판매일자"])
+            df["판매연도"] = df["판매일자"].dt.year
+            df["판매월"] = df["판매일자"].dt.month
+            cols = [c for c in df.columns if c != '판매월'] + ['판매월']
+            df = df[cols]
+            df["판매일자"] = pd.to_datetime(df["판매일자"]).dt.date
+            return df
+
+        base_df = _memoize(
+            "base_file_df", _files_fingerprint(base_file), _compute_base_df,
+        )
 
         total_cnt = len(base_df)
         consign_cnt = (base_df['매입유형1'] == '위탁').sum()

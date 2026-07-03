@@ -13,6 +13,7 @@
 """
 
 from io import BytesIO
+import functools
 import re
 
 import numpy as np
@@ -1263,6 +1264,20 @@ def _build_chassis_month_value_lookup(
     return lookup
 
 
+@functools.lru_cache(maxsize=2)
+def _read_cost_summary_master_cached(path, mtime, size):
+    """(path, mtime, size)가 같으면 재사용 — 같은 실행/리런 내 중복 읽기 방지.
+
+    maxsize 를 작게 유지해 큰 마스터 DataFrame이 여러 버전 메모리에 쌓이지 않게 함."""
+    try:
+        return _strip_columns(pd.read_excel(path, sheet_name="최종원가마스터"))
+    except Exception:
+        try:
+            return _strip_columns(pd.read_excel(path))
+        except Exception:
+            return None
+
+
 def _load_latest_cost_summary_master():
     """앱 폴더의 최신 cost_summary_*.xlsx 를 읽어 반환. 없거나 실패하면 빈 df."""
     import glob
@@ -1278,13 +1293,10 @@ def _load_latest_cost_summary_master():
 
     paths.sort(key=lambda path: os.path.basename(path), reverse=True)
     for path in paths:
-        try:
-            return _strip_columns(pd.read_excel(path, sheet_name="최종원가마스터"))
-        except Exception:
-            try:
-                return _strip_columns(pd.read_excel(path))
-            except Exception:
-                continue
+        stat = os.stat(path)
+        result = _read_cost_summary_master_cached(path, stat.st_mtime, stat.st_size)
+        if result is not None:
+            return result
     return pd.DataFrame()
 
 

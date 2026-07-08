@@ -55,6 +55,7 @@ from cost_summary_preprocess import (
     _normal_inbound_mask,
     _excel_round,
     _excel_round_series,
+    _prev_month_end_if_prepaid,
 )
 
 
@@ -167,9 +168,10 @@ def _aggregate_ledger_by_cost_type(purchase_cost_sheet_dfs, cost_type):
         return result
 
     grouped = matched.groupby("상품ID")["금액"].agg(["count", "sum"])
-    for product_id, row in grouped.iterrows():
-        result[product_id] = {"count": int(row["count"]), "amount": float(row["sum"])}
-    return result
+    return {
+        product_id: {"count": int(count), "amount": float(amount)}
+        for product_id, count, amount in grouped.itertuples()
+    }
 
 
 def _extract_product_ledger_aggregates(purchase_cost_sheet_dfs, settlement_year=None, settlement_month=None):
@@ -1585,13 +1587,17 @@ def _append_process_category_columns(final_df, combined_cost_driver_df):
     sales_type_series = final_df["매출구분"].astype(str).str.strip()
     inspection_mask = sales_type_series.eq("검사매출")
 
-    # 각 공정별 컬럼 채우기
+    # 각 공정별 컬럼 채우기: (상품ID, 매출구분) 쌍을 키로 벡터화된 map (row-loop 없이)
+    pair_keys = pd.Series(
+        list(zip(product_id_series, sales_type_series)), index=final_df.index,
+    )
     for column_name, category in PROCESS_CATEGORY_COLUMNS.items():
-        values = [
-            float(hours_map.get((pid, st_type, category), 0))
-            for pid, st_type in zip(product_id_series, sales_type_series)
-        ]
-        final_df[column_name] = pd.Series(values, index=final_df.index, dtype=float)
+        category_map = {
+            (pid, st_type): hours
+            for (pid, st_type, cat), hours in hours_map.items()
+            if cat == category
+        }
+        final_df[column_name] = pair_keys.map(category_map).fillna(0).astype(float)
 
     # 검사매출 행 처리: 모든 공정별 컬럼 0
     for column in PROCESS_CATEGORY_COLUMNS.keys():
@@ -1601,17 +1607,15 @@ def _append_process_category_columns(final_df, combined_cost_driver_df):
 
     # 공정별_전체 = 4개 합
     # float64 누적 덧셈은 5.10+2.30+1.20+1.38=9.9799... 같은 오차가 생기므로
-    # 행별로 Decimal 덧셈해서 정확한 십진수 합을 구한다
+    # Decimal 덧셈해서 정확한 십진수 합을 구한다. zip 으로 raw 컬럼을 직접 순회해
+    # (.apply(axis=1)가 매 행마다 Series를 새로 만드는 오버헤드를 피함)
     from decimal import Decimal as _Decimal
-    def _decimal_row_sum(row):
-        return float(sum(_Decimal(str(v)) for v in row))
     cols_for_total = list(PROCESS_CATEGORY_COLUMNS.keys())
-    final_df[PROCESS_CATEGORY_TOTAL_COLUMN] = (
-        final_df[cols_for_total]
-        .apply(pd.to_numeric, errors="coerce")
-        .fillna(0)
-        .apply(_decimal_row_sum, axis=1)
-    )
+    numeric_cols = final_df[cols_for_total].apply(pd.to_numeric, errors="coerce").fillna(0)
+    final_df[PROCESS_CATEGORY_TOTAL_COLUMN] = [
+        float(sum(_Decimal(str(v)) for v in row))
+        for row in zip(*(numeric_cols[c] for c in cols_for_total))
+    ]
 
     return final_df
 
@@ -1659,7 +1663,13 @@ def _pick_sheet_for_settlement_month(sheet_map, settlement_year, settlement_mont
 def _aggregate_cost_driver_by_product_id(
     cost_driver_dfs, keyword, day_column, settlement_year, settlement_month,
 ):
-    """cost_driver_dfs[keyword] 의 결산월 시트에서 상품ID별 day_column 값 합산."""
+    """cost_driver_dfs[keyword] 의 결산월 데이터에서 상품ID별 day_column 값 합산.
+
+    - 신규(롱 포맷, RTC_SM 단일 시트): '연도'/'월' 컬럼으로 결산월 행만 골라
+      '결산월_일수' 컬럼을 상품ID별로 합산
+    - 구버전(와이드 포맷, 시트명=연월): 결산연월에 해당하는 시트를 고른 뒤
+      '{연도}-{월:02d}_일수' 컬럼을 상품ID별로 합산
+    """
     if not cost_driver_dfs:
         return None
     sheet_map = cost_driver_dfs.get(keyword)
@@ -1671,6 +1681,34 @@ def _aggregate_cost_driver_by_product_id(
         sheet_map = {keyword: sheet_map}
     if not isinstance(sheet_map, dict) or len(sheet_map) == 0:
         return None
+
+    if settlement_year is not None and settlement_month is not None:
+        for df in sheet_map.values():
+            if df is None or df.empty:
+                continue
+            if not {"연도", "월", "결산월_일수", "상품ID"}.issubset(df.columns):
+                continue
+
+            year_values = pd.to_numeric(df["연도"], errors="coerce")
+            month_values = pd.to_numeric(df["월"], errors="coerce")
+            period_df = df[
+                year_values.eq(int(settlement_year)) & month_values.eq(int(settlement_month))
+            ]
+            if period_df.empty:
+                return None
+
+            temp = period_df[["상품ID", "결산월_일수"]].copy()
+            temp["상품ID"] = temp["상품ID"].astype(str).str.strip()
+            temp["결산월_일수"] = pd.to_numeric(temp["결산월_일수"], errors="coerce").fillna(0)
+            temp = temp[temp["상품ID"].ne("")].copy()
+            if temp.empty:
+                return None
+
+            return (
+                temp.groupby("상품ID", as_index=False)["결산월_일수"]
+                .sum()
+                .rename(columns={"결산월_일수": day_column})
+            )
 
     df = _pick_sheet_for_settlement_month(sheet_map, settlement_year, settlement_month)
     if df is None or df.empty:
@@ -1758,22 +1796,12 @@ def _append_total_purchase_cost_columns(final_df):
     return final_df
 
 
-def _load_master_pnl_product_id_counts(settlement_year=None, settlement_month=None):
-    """코드와 같은 위치의 master_pnl.xlsx 에서 (상품ID, 판매연도, 판매월) 조합별 개수 반환.
+@functools.lru_cache(maxsize=2)
+def _load_master_pnl_product_id_counts_cached(path, mtime, size):
+    """_load_master_pnl_product_id_counts 의 실제 계산부.
 
-    반환: {(상품ID, 연, 월): 개수}. 각 상품 행의 (회계연도, 회계월) 로 매칭한다.
-    파일 없거나 상품ID 컬럼 없으면 {}.
-    """
-    import os
-
-    candidates = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_pnl.xlsx"),
-        "master_pnl.xlsx",
-    ]
-    path = next((p for p in candidates if os.path.exists(p)), None)
-    if path is None:
-        return {}
-
+    (path, mtime, size) 가 같으면(파일이 안 바뀌었으면) 재계산하지 않음 — 결산월 일괄
+    처리 시 같은 master_pnl.xlsx 를 매 결산월마다 다시 읽고 그룹핑하지 않게 하기 위함."""
     try:
         df = pd.read_excel(path)
     except Exception:
@@ -1814,6 +1842,30 @@ def _load_master_pnl_product_id_counts(settlement_year=None, settlement_month=No
     return result
 
 
+def _load_master_pnl_product_id_counts(settlement_year=None, settlement_month=None):
+    """코드와 같은 위치의 master_pnl.xlsx 에서 (상품ID, 판매연도, 판매월) 조합별 개수 반환.
+
+    반환: {(상품ID, 연, 월): 개수}. 각 상품 행의 (회계연도, 회계월) 로 매칭한다.
+    파일 없거나 상품ID 컬럼 없으면 {}.
+    """
+    import os
+
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_pnl.xlsx"),
+        "master_pnl.xlsx",
+    ]
+    path = next((p for p in candidates if os.path.exists(p)), None)
+    if path is None:
+        return {}
+
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return {}
+
+    return _load_master_pnl_product_id_counts_cached(path, stat.st_mtime, stat.st_size)
+
+
 # ============================================================
 # 누적 마스터에서 직전월 기초재고 자동 생성
 # ============================================================
@@ -1842,9 +1894,10 @@ _MASTER_TO_INVENTORY_DETAIL_COLUMNS = [
 
 
 def _find_latest_cost_summary_path():
-    """가장 최근 cost_summary_*.xlsx 경로 반환 (없으면 None).
+    """가장 최근 cost_summary_*.parquet(우선) 또는 *.xlsx 경로 반환 (없으면 None).
 
     빌더 파일 위치(앱 루트)를 먼저 검색하고, 그 다음 부모 폴더/현재 작업 디렉토리로 fallback.
+    parquet 가 더 빠르고 가벼워서 새 저장은 parquet로 나가고, 기존 xlsx 도 계속 읽을 수 있게 둘 다 검색.
     """
     import os
     import glob
@@ -1855,7 +1908,11 @@ def _find_latest_cost_summary_path():
     matched = []
     for priority, d in enumerate(search_dirs):
         try:
-            for p in glob.glob(os.path.join(d, "cost_summary_*.xlsx")):
+            paths = (
+                glob.glob(os.path.join(d, "cost_summary_*.parquet"))
+                + glob.glob(os.path.join(d, "cost_summary_*.xlsx"))
+            )
+            for p in paths:
                 if os.path.exists(p) and os.path.getsize(p) > 0:
                     matched.append((p, priority))
         except Exception:
@@ -1875,14 +1932,23 @@ def _read_master_df_cached(path, mtime, size):
     """(path, mtime, size)가 같으면 재사용 — 같은 실행/리런 내 중복 읽기 방지.
 
     maxsize를 작게 유지해 큰 마스터 DataFrame이 여러 버전 메모리에 쌓이지 않게 함
-    (Streamlit Cloud 메모리 한도 대응)."""
-    try:
-        return pd.read_excel(path, sheet_name="최종원가마스터")
-    except Exception:
+    (Streamlit Cloud 메모리 한도 대응).
+
+    parquet 면 그대로 읽고(제일 빠름), xlsx 면 calamine → openpyxl 순으로 시도."""
+    if str(path).lower().endswith(".parquet"):
         try:
-            return pd.read_excel(path)
+            return pd.read_parquet(path)
         except Exception:
             return None
+    for engine in ("calamine", "openpyxl"):
+        try:
+            return pd.read_excel(path, sheet_name="최종원가마스터", engine=engine)
+        except Exception:
+            try:
+                return pd.read_excel(path, engine=engine)
+            except Exception:
+                continue
+    return None
 
 
 def _read_master_df(path):
@@ -2140,10 +2206,9 @@ def _build_consignment_outbound_status_map(consignment_ledger_df):
     if matched.empty:
         return {}
 
-    result = {}
-    for _, row in matched.iterrows():
-        result[row["상품ID"]] = row["출고상태"]
-    return result
+    # dict(zip(...))는 뒤에 나온 (상품ID, 출고상태) 쌍이 앞의 걸 덮어써서
+    # "같은 상품ID면 마지막 값" 의미를 그대로 유지하면서 iterrows 없이 처리
+    return dict(zip(matched["상품ID"], matched["출고상태"]))
 
 def _append_inventory_quantity_amount_columns(
     final_df, inventory_df, purchase_cost_sheet_dfs, settlement_month,
@@ -2306,19 +2371,18 @@ def _append_inventory_quantity_amount_columns(
     else:
         acct_month = pd.Series([settlement_month] * n, index=final_df.index)
 
-    def _master_lookup(pid, yr, mo):
-        yr_int = int(yr) if pd.notna(yr) else None
-        mo_int = int(mo) if pd.notna(mo) else None
-        return master_count_map.get((str(pid).strip(), yr_int, mo_int), 0)
+    def _int_or_none(v):
+        return int(v) if pd.notna(v) else None
 
-    master_qty = pd.Series(
-        [
-            _master_lookup(pid, yr, mo)
-            for pid, yr, mo in zip(product_id_series, acct_year, acct_month)
-        ],
+    master_lookup_keys = pd.Series(
+        list(zip(
+            product_id_series,
+            acct_year.apply(_int_or_none),
+            acct_month.apply(_int_or_none),
+        )),
         index=final_df.index,
-        dtype=float,
     )
+    master_qty = master_lookup_keys.map(master_count_map).fillna(0).astype(float)
 
     # (b) 위탁수불부 출고==1 개수
     consignment_count_map = _build_consignment_outbound_counts(
@@ -2357,9 +2421,11 @@ def _append_inventory_quantity_amount_columns(
     )
     final_df["기말_금액"] = ending_amount
 
-    # 위탁출고구분: 위탁수불부 출고여부==1 인 행의 출고상태 값 (상품ID 매칭)
+    # 위탁출고구분: 매출구분이 위탁매출인 행만 대상으로, 위탁수불부 출고여부==1 인 행의
+    # 출고상태 값을 상품ID로 매칭 (그 외 매출구분은 상품ID가 우연히 겹쳐도 채우지 않음)
     status_map = _build_consignment_outbound_status_map(consignment_ledger_df)
-    final_df["위탁출고구분"] = product_id_series.map(status_map)
+    consignment_status = product_id_series.map(status_map)
+    final_df["위탁출고구분"] = consignment_status.where(consignment_sales_mask, "")
     final_df["위탁출고구분"] = final_df["위탁출고구분"].apply(
         lambda v: "" if pd.isna(v) else str(v)
     )
@@ -2636,6 +2702,17 @@ def _reorder_final_columns(
             + pd.to_numeric(final_df.get(mfg_col, 0), errors="coerce").fillna(0)
         )
 
+    # 계산서일자_수정: 매입일자가 선매입이면 전월 말일(EOMONTH-1), 아니면 매입일자 그대로.
+    # (원가대상 "구분포함 상세보기"와 동일한 규칙 — 아래에서 '매입일자' 바로 뒤에 배치)
+    if "매입일자" in final_df.columns:
+        _purchase_date = pd.to_datetime(final_df["매입일자"], format="mixed", errors="coerce")
+        _is_prepaid = (
+            final_df["선매입여부"].astype(str).str.strip().eq("선매입")
+            if "선매입여부" in final_df.columns
+            else pd.Series(False, index=final_df.index)
+        )
+        final_df["계산서일자_수정"] = _prev_month_end_if_prepaid(_purchase_date, _is_prepaid)
+
     tail_columns = [
         f"{TOTAL_PURCHASE_COST_COLUMN}_합계",
         f"{TOTAL_PURCHASE_COST_COLUMN}_전월",
@@ -2673,6 +2750,11 @@ def _reorder_final_columns(
 
     tail_columns = [c for c in tail_columns if c in final_df.columns]
     base_columns = [c for c in final_df.columns if c not in tail_columns]
+
+    # 계산서일자_수정을 '매입일자' 바로 뒤로 이동
+    if "계산서일자_수정" in base_columns and "매입일자" in base_columns:
+        base_columns.remove("계산서일자_수정")
+        base_columns.insert(base_columns.index("매입일자") + 1, "계산서일자_수정")
 
     # 수량/금액 묶음 컬럼: 원본 기초재고/정상입고/타처입고 위치에 배치하고 원본은 제거
     inventory_block = [
@@ -2722,80 +2804,10 @@ def _reorder_final_columns(
     final_df = final_df.rename(columns=_build_output_column_rename_map())
     final_df.attrs.update(_saved_attrs)
 
-    # 최종 정렬
-    final_df = _sort_final_cost_df(final_df)
+    # 행 순서는 product_id_df(원가대상) 단계에서 이미 _sort_product_id_df 로 정렬된 걸
+    # 그대로 유지한다 — 중간 단계들은 전부 인덱스 기준 컬럼 추가/left-merge라 순서를 바꾸지
+    # 않으므로, 여기서 별도 재정렬을 하지 않아야 원가대상과 최종원가 순서가 항상 일치한다.
     return final_df
-
-
-def _sort_final_cost_df(final_df):
-    """최종 원가 정렬.
-
-    1) 매출구분: 사내매출 > 위탁매출 > 검사매출 > 정비매출
-    2) 기초_수량==1 > 정상입고_수량==1 > 타처입고_수량==1 (해당 수량이 1인 순서)
-    3) 당사차량 → 매입일자(계산서일자) 오름차순 / 타사차량 → 반납일자 오름차순
-    """
-    if final_df.empty:
-        return final_df
-
-    df = final_df.copy()
-
-    # 1) 매출구분 우선순위
-    sales_order = {"사내매출": 0, "위탁매출": 1, "검사매출": 2, "정비매출": 3}
-    sales_key = (
-        df["매출구분"].astype(str).str.strip().map(sales_order).fillna(99)
-        if "매출구분" in df.columns
-        else pd.Series([99] * len(df), index=df.index)
-    )
-
-    # 2) 수량 우선순위: 기초==1 →0, 정상입고==1 →1, 타처입고==1 →2, 그 외 →3
-    def qty_rank(row):
-        if "기초_수량" in df.columns and pd.to_numeric(pd.Series([row.get("기초_수량", 0)]), errors="coerce").fillna(0).iloc[0] == 1:
-            return 0
-        if "정상입고_수량" in df.columns and pd.to_numeric(pd.Series([row.get("정상입고_수량", 0)]), errors="coerce").fillna(0).iloc[0] == 1:
-            return 1
-        if "타처입고_수량" in df.columns and pd.to_numeric(pd.Series([row.get("타처입고_수량", 0)]), errors="coerce").fillna(0).iloc[0] == 1:
-            return 2
-        return 3
-
-    base_q = pd.to_numeric(df.get("기초_수량", 0), errors="coerce").fillna(0)
-    normal_q = pd.to_numeric(df.get("정상입고_수량", 0), errors="coerce").fillna(0)
-    transfer_q = pd.to_numeric(df.get("타처입고_수량", 0), errors="coerce").fillna(0)
-    qty_key = pd.Series(3, index=df.index)
-    qty_key = qty_key.mask(transfer_q.eq(1), 2)
-    qty_key = qty_key.mask(normal_q.eq(1), 1)
-    qty_key = qty_key.mask(base_q.eq(1), 0)
-
-    # 3) 날짜 키: 당사차량 → 매입일자, 타사차량 → 반납일자
-    own_mask = (
-        df["당사/타사"].astype(str).str.strip().eq("당사차량")
-        if "당사/타사" in df.columns
-        else pd.Series([False] * len(df), index=df.index)
-    )
-    purchase_date = (
-        pd.to_datetime(df["매입일자"], errors="coerce")
-        if "매입일자" in df.columns
-        else pd.Series([pd.NaT] * len(df), index=df.index)
-    )
-    return_date = (
-        pd.to_datetime(df["반납일자"], errors="coerce")
-        if "반납일자" in df.columns
-        else pd.Series([pd.NaT] * len(df), index=df.index)
-    )
-    date_key = purchase_date.where(own_mask, return_date)
-
-    df["_sales_key"] = sales_key.values
-    df["_qty_key"] = qty_key.values
-    df["_date_key"] = date_key.values
-
-    df = df.sort_values(
-        by=["_sales_key", "_qty_key", "_date_key"],
-        ascending=[True, True, True],
-        na_position="last",
-        kind="stable",
-    ).drop(columns=["_sales_key", "_qty_key", "_date_key"]).reset_index(drop=True)
-
-    df.attrs.update(final_df.attrs)
-    return df
 
 
 def _build_output_column_rename_map():

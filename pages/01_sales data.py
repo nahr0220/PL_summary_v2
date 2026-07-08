@@ -38,8 +38,15 @@ def _memoize(cache_name, fingerprint, compute_fn):
 
 @st.cache_data(show_spinner=False, max_entries=2)
 def _read_master_pnl_cached(path, mtime):
-    """master_pnl.xlsx 읽기 (mtime 을 캐시 키로 사용) — VIEW 탭 리런마다 재파싱하지 않도록 함."""
-    return pd.read_excel(path)
+    """master_pnl 읽기 (mtime 을 캐시 키로 사용) — VIEW 탭 리런마다 재파싱하지 않도록 함.
+
+    parquet 면 그대로 읽고(제일 빠름), xlsx 면 calamine → openpyxl 순으로 폴백."""
+    if str(path).lower().endswith(".parquet"):
+        return pd.read_parquet(path)
+    try:
+        return pd.read_excel(path, engine="calamine")
+    except Exception:
+        return pd.read_excel(path)
 
 def mask_value(value):
     # 값이 없거나 NaN인 경우 빈 문자열 처리
@@ -193,12 +200,13 @@ def render_douzone_pl(source_df, key_prefix="pl"):
             )
 
 st.set_page_config(page_title="손익분석", layout="wide")
-st.title("Sales Summary")
+st.title("Sales Data")
 
 tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])
 
 with tab1:  # VIEW (매출요약정보)
-    master_file = "master_pnl.xlsx"
+    # parquet 가 있으면 우선 사용(더 빠름), 없으면 기존 xlsx 마스터를 그대로 사용
+    master_file = "master_pnl.parquet" if os.path.exists("master_pnl.parquet") else "master_pnl.xlsx"
     if os.path.exists(master_file) and os.path.getsize(master_file) > 0:
 
         master_df = _read_master_pnl_cached(master_file, os.path.getmtime(master_file))
@@ -229,7 +237,9 @@ with tab1:  # VIEW (매출요약정보)
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("✅ 삭제", use_container_width=True):
-                    os.remove(master_file)
+                    for _f in ("master_pnl.parquet", "master_pnl.xlsx"):
+                        if os.path.exists(_f):
+                            os.remove(_f)
                     st.session_state['delete_confirm'] = False
                     st.rerun()
             with c2:

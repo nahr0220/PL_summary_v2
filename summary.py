@@ -52,10 +52,19 @@ def _build_sales_division_id(sales_type_series, product_id_series):
 def _read_excel_cached(path, mtime, sheet_name=None):
     """파일 수정시간을 캐시 키에 포함해 같은 엑셀 반복 읽기를 줄인다.
 
-    max_entries 를 작게 유지해 큰 DataFrame 버전이 서버 메모리에 계속 쌓이지 않게 함."""
-    if sheet_name is None:
-        return pd.read_excel(path)
-    return pd.read_excel(path, sheet_name=sheet_name)
+    max_entries 를 작게 유지해 큰 DataFrame 버전이 서버 메모리에 계속 쌓이지 않게 함.
+
+    parquet 면 그대로 읽고(sheet_name 무시), xlsx 면 calamine → openpyxl 순으로 폴백."""
+    if str(path).lower().endswith(".parquet"):
+        return pd.read_parquet(path)
+    for engine in ("calamine", "openpyxl"):
+        try:
+            if sheet_name is None:
+                return pd.read_excel(path, engine=engine)
+            return pd.read_excel(path, sheet_name=sheet_name, engine=engine)
+        except Exception:
+            continue
+    raise RuntimeError(f"엑셀 파일을 읽을 수 없습니다: {path}")
 
 
 def _memoize(cache_name, fingerprint, compute_fn):
@@ -86,7 +95,11 @@ def load_final_cost_master():
     matched = []
     for d in search_dirs:
         try:
-            for p in glob.glob(os.path.join(d, "cost_summary_*.xlsx")):
+            candidates = (
+                glob.glob(os.path.join(d, "cost_summary_*.parquet"))
+                + glob.glob(os.path.join(d, "cost_summary_*.xlsx"))
+            )
+            for p in candidates:
                 if os.path.exists(p) and os.path.getsize(p) > 0:
                     matched.append(p)
         except Exception:

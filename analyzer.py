@@ -5,6 +5,22 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+def _sanitize_for_parquet(df):
+    """parquet 저장 전, 한 컬럼 안에 타입이 섞여있으면(엑셀은 허용하지만 parquet는 저장을
+    거부함) 그 컬럼만 문자열로 통일한다. 다운스트림에서 이미 pd.to_datetime/pd.to_numeric
+    (errors='coerce')로 방어적으로 다시 변환하는 패턴이라 안전하다."""
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype != object:
+            continue
+        non_null = df[col].dropna()
+        if non_null.empty:
+            continue
+        if len(non_null.map(type).unique()) > 1:
+            df[col] = df[col].map(lambda v: v if pd.isna(v) else str(v))
+    return df
+
+
 def distribute_indirect_cost(df, merged_df, category_name, col_name, target_mask=None, use_month_match=True):
     df[col_name] = 0
     df[f"{col_name}_직"] = 0
@@ -239,7 +255,11 @@ def compute_verification(df, verify_file=None):
             verify_error = str(e)
     return df, verify_error
 
-def save_to_master(new_df, verify_file=None, file_name="master_pnl.xlsx"):
+def save_to_master(new_df, verify_file=None, file_name="master_pnl.parquet"):
+    """판매 마스터 저장. parquet 로 저장(엑셀보다 훨씬 빠르고 가벼움).
+
+    기존에 master_pnl.xlsx 로 저장되어 있던 데이터가 있으면(parquet 가 아직 없는 최초 1회)
+    자동으로 읽어들여 그대로 parquet 로 이관 저장한다."""
     new_df, verify_error = compute_verification(new_df, verify_file)
     # 기존코드
     # if os.path.exists(file_name):
@@ -249,9 +269,17 @@ def save_to_master(new_df, verify_file=None, file_name="master_pnl.xlsx"):
     # else:
     #     combined_df = new_df
     # 해당월만 새로 업데이트로 수정
+    legacy_file_name = (
+        file_name[: -len(".parquet")] + ".xlsx" if file_name.endswith(".parquet") else None
+    )
     if os.path.exists(file_name):
-        old_df = pd.read_excel(file_name)
+        old_df = pd.read_parquet(file_name) if file_name.endswith(".parquet") else pd.read_excel(file_name)
+    elif legacy_file_name and os.path.exists(legacy_file_name):
+        old_df = pd.read_excel(legacy_file_name)  # 최초 1회: 기존 xlsx 마스터에서 이관
+    else:
+        old_df = None
 
+    if old_df is not None:
         # 판매월 컬럼 숫자형 정리
         old_df["판매월"] = pd.to_numeric(old_df["판매월"], errors="coerce")
         new_df["판매월"] = pd.to_numeric(new_df["판매월"], errors="coerce")
@@ -280,5 +308,8 @@ def save_to_master(new_df, verify_file=None, file_name="master_pnl.xlsx"):
         cols = [c for c in combined_df.columns if c != "updated_at"] + ["updated_at"]
         combined_df = combined_df[cols]
 
-    combined_df.to_excel(file_name, index=False)
+    if file_name.endswith(".parquet"):
+        _sanitize_for_parquet(combined_df).to_parquet(file_name, index=False)
+    else:
+        combined_df.to_excel(file_name, index=False)
     return file_name, verify_error

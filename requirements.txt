@@ -5,3 +5,4 @@ xlsxwriter
 altair<5
 xlrd>=2.0.1
 pyarrow
+python-calamine

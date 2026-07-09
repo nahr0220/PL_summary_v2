@@ -1641,6 +1641,8 @@ def _prepare_payback_sheet(df, detail_lookup, settlement_year=None, settlement_m
 
     if "차량번호" in df.columns:
         product_ids = []
+        # 차량번호 단위 캐시 — 같은 차량번호가 여러 행에 반복되면 매번 선형 탐색하지 않게 함
+        lookup_cache = {}
         for index, row in df.iterrows():
             car_number = str(row["차량번호"]).strip() if pd.notna(row["차량번호"]) else ""
             normalized_car_number = _normalize_lookup_value(car_number)
@@ -1650,7 +1652,11 @@ def _prepare_payback_sheet(df, detail_lookup, settlement_year=None, settlement_m
             elif car_number == "지게차":
                 product_id = original_product_ids.loc[index]
             else:
-                product_id = _lookup_product_id_by_car_number(car_number, detail_lookup)
+                if car_number not in lookup_cache:
+                    lookup_cache[car_number] = _lookup_product_id_by_car_number(
+                        car_number, detail_lookup,
+                    )
+                product_id = lookup_cache[car_number]
             product_ids.append(product_id)
         df["상품ID"] = product_ids
     elif "상품ID" not in df.columns:

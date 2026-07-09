@@ -179,6 +179,30 @@ def render_dataframe_tabs(sheet_dfs):
             st.dataframe(dataframe_for_display(current_df), use_container_width=True)
 
 
+def render_section_heading(text):
+    """섹션 제목 왼쪽에 강조색 세로 바를 붙여 눈에 띄게 표시 (버튼과 같은 강조색 재사용)."""
+    st.markdown(
+        "<div style='border-left:4px solid #ff4b4b; line-height:1.15; "
+        "padding:0 0 0 0.5rem; margin:0.4rem 0 0.2rem 0;'>"
+        f"<span style='font-size:24px; font-weight:600; line-height:1.15;'>{text}</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_sub_heading(text):
+    """상위 섹션 제목(render_section_heading) 바로 아래 붙는 작은 소제목.
+
+    위쪽은 섹션 제목과 살짝 띄우고, 아래쪽은 바로 뒤에 오는 업로드 위젯과 간격 없이 붙인다.
+    """
+    st.markdown(
+        "<div style='margin-top:0.6rem; margin-bottom:-0.1rem;'>"
+        f"<span style='font-size:20px; font-weight:600;'>{text}</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_sheet_workbook(sheet_dfs, download_label, file_name, empty_message):
     if not sheet_dfs:
         st.info(empty_message)
@@ -206,35 +230,38 @@ def render_settlement_selector():
     if "settlement_month" not in st.session_state:
         st.session_state["settlement_month"] = pd.Timestamp.today().month
 
-    year_col, month_col, _, button_col = st.columns([1, 1, 1, 0.6])
+    render_section_heading("원가산출 기준월 지정")
+
+    year_col, month_col, _spacer_col, button_col = st.columns([1, 1, 1, 0.6])
 
     with year_col:
         selected_year = st.number_input(
-            "결산연도", min_value=2000, max_value=2100,
+            "기준연도", min_value=2000, max_value=2100,
             value=int(st.session_state["settlement_year"]),
             step=1, key="selected_settlement_year",
         )
     with month_col:
         selected_month = st.selectbox(
-            "결산월", options=list(range(1, 13)),
+            "기준월", options=list(range(1, 13)),
             index=st.session_state["settlement_month"] - 1,
             format_func=lambda month: f"{month}월",
             key="selected_settlement_month",
         )
     with button_col:
-        st.write("")
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
         apply_period = st.button(
-            "결산연/월 적용", key="apply_settlement_period", use_container_width=True,
+            "기준연/월 적용", key="apply_settlement_period",
+            use_container_width=True, type="primary",
         )
 
     if apply_period:
         st.session_state["settlement_year"] = int(selected_year)
         st.session_state["settlement_month"] = selected_month
-        st.success(f"결산연/월이 {int(selected_year)}년 {selected_month}월로 지정되었습니다.")
+        st.success(f"기준연/월이 {int(selected_year)}년 {selected_month}월로 지정되었습니다.")
 
     settlement_year = st.session_state["settlement_year"]
     settlement_month = st.session_state["settlement_month"]
-    st.caption(f"현재 결산연/월: {settlement_year}년 {settlement_month}월")
+    st.caption("기준연도/월 기준부터 원가가 재계산됩니다.")
     st.divider()
     return settlement_year, settlement_month
 
@@ -288,11 +315,15 @@ def process_opening_inventory_sheet(sheets, dfs):
         st.error(f"기초재고 시트 처리 중 오류: {exc}")
 
 
-def compute_base_dfs_from_sheets(sheets, settlement_year, settlement_month):
+def compute_base_dfs_from_sheets(sheets, settlement_year, settlement_month, quiet=False):
     """원가대상 원본 시트 dict → 처리된 dfs (렌더링과 분리된 순수 계산).
 
     파일 업로드 위젯과 무관하게, 이미 읽어들인 시트 dict 와 결산연/월만으로 호출 가능
     (일괄 처리 시 같은 시트를 여러 결산월에 대해 반복 호출하기 위함).
+
+    quiet=True 면 자동 생성/제외 안내(st.info/st.warning)를 표시하지 않는다 —
+    여러 달을 한 번에 처리할 때 화면에 메시지가 줄줄이 쌓이는 걸 막기 위함
+    (에러는 quiet 여부와 무관하게 항상 표시).
     """
     local_dfs = initialize_base_dfs()
 
@@ -331,7 +362,7 @@ def compute_base_dfs_from_sheets(sheets, settlement_year, settlement_month):
                     local_dfs["매입조회"], prepaid_filter_df,
                 )
                 removed_count = before_count - len(local_dfs["매입조회"])
-                if removed_count > 0:
+                if removed_count > 0 and not quiet:
                     st.info(
                         f"전월 마스터 선매입 차량 {removed_count:,}건을 "
                         "매입조회에서 제외했습니다."
@@ -345,11 +376,12 @@ def compute_base_dfs_from_sheets(sheets, settlement_year, settlement_month):
                 local_dfs["기초재고_전체"] = auto_inv
                 prev_y = settlement_year - 1 if settlement_month == 1 else settlement_year
                 prev_m = 12 if settlement_month == 1 else settlement_month - 1
-                st.info(
-                    f"기초재고 파일이 업로드되지 않아 누적 마스터에서 "
-                    f"{prev_y}-{prev_m:02d} 기말 데이터를 자동으로 가져왔습니다. "
-                    f"({len(auto_inv):,}건)"
-                )
+                if not quiet:
+                    st.info(
+                        f"기초재고 파일이 업로드되지 않아 누적 마스터에서 "
+                        f"{prev_y}-{prev_m:02d} 기말 데이터를 자동으로 가져왔습니다. "
+                        f"({len(auto_inv):,}건)"
+                    )
         except Exception as exc:
             st.warning(f"기초재고 자동 생성 중 오류: {exc}")
 
@@ -393,11 +425,10 @@ def detect_available_periods(base_sheets):
 
 
 def render_base_upload(settlement_year, settlement_month):
-    st.subheader("원가대상")
+    render_section_heading("원가대상")
 
     uploaded_file = st.file_uploader(
-        "원가대상 업로드 "
-        "(기초재고/매입조회/전체상품관리_선매입/위탁수불부/복수비용_검사/복수비용_정비 시트를 포함한 엑셀 파일 1개)",
+        "업로드 파일 ㅣ cost data_대상 l 기초재고/ 매입조회/ 전체상품조회/ 위탁수불부/ 복수비용_검사/ 복수비용_정비 (총 6개 시트 포함)",
         type=["xlsx"],
     )
 
@@ -533,10 +564,10 @@ def process_purchase_cost_sheets(sheets, product_id_df, dfs, settlement_year, se
 
 
 def render_purchase_cost_upload(product_id_df, dfs, settlement_year, settlement_month):
-    st.markdown("##### 매입원가")
+    render_sub_heading("매입원가")
 
     uploaded_cost_file = st.file_uploader(
-        "매입원가 업로드 (상품원장/폐자원공제/페이백 시트를 포함한 엑셀 파일 1개)",
+        "업로드 파일 ㅣ cost data_매입원가 l 상품원장/ 재활용폐자원세액공제신고서/ 페이백 (총 3개 시트 포함)",
         type=["xlsx", "xls"], key="cost_file",
     )
 
@@ -630,10 +661,10 @@ def process_manufacturing_cost_sheets(sheets, product_id_df, settlement_year, se
 
 
 def render_manufacturing_cost_upload(product_id_df, settlement_year, settlement_month):
-    st.markdown("##### 제조원가")
+    render_sub_heading("제조원가")
 
     uploaded_file = st.file_uploader(
-        "제조원가 업로드 (재료비/노무비/부문별경비/직접경비 시트를 포함한 엑셀 파일 1개)",
+        "업로드 파일 ㅣ cost data_제조원가 l 재료비/ 노무비/ 부문별경비/ 직접경비 시트 포함 (총 4개 시트 포함)",
         type=["xlsx", "xls"], key="manufacturing_cost_file",
     )
 
@@ -724,11 +755,11 @@ def process_cost_driver_sheets(sheets):
 
 
 def render_cost_driver_upload(settlement_year=None, settlement_month=None):
-    st.subheader("배부 기준자료")
-    st.markdown("##### 원가동인")
+    render_section_heading("배부 기준자료")
+    render_sub_heading("원가동인")
 
     uploaded_file = st.file_uploader(
-        "원가동인 업로드 (RQI/RTLS/TS/RTC_SM 시트를 포함한 엑셀 파일 1개)",
+        "업로드 파일 ㅣcost data_원가동인 l RQI/ TS/ RTLS/ RTC/ SM",
         type=["xlsx", "xls"], key="cost_driver_file",
     )
 
@@ -1328,10 +1359,10 @@ def render_combined_cost_driver(
 # ============================================================
 
 def render_verification_sheet_upload():
-    st.markdown("##### 기간별제조원가보고서")
+    render_sub_heading("기간별제조원가보고서")
 
     uploaded_file = st.file_uploader(
-        "기간별제조원가보고서 업로드",
+        "업로드 파일 ㅣ 총 1개 파일 ㅣ 검증용 ",
         type=["xlsx", "xls"], accept_multiple_files=False, key="verification_sheet_file",
     )
 
@@ -1379,7 +1410,7 @@ def render_final_cost(
     cost_driver_dfs=None,
     combined_cost_driver_df=None,
 ):
-    st.subheader("차량별 원가현황")
+    render_section_heading("차량별 원가현황")
 
     final_cost_df, _cached_diag, _cached_material_diag = _cached_build_final_cost_df(
         product_id_df,
@@ -1609,12 +1640,14 @@ def run_batch_periods(
     그대로 이어받아, 파일을 한 번만 올려도 1월→2월→3월... 순으로 이어서 계산되게 하기 위함.
     """
     cost_driver_dfs_raw = process_cost_driver_sheets(cost_driver_sheets)
+    status_placeholder = st.empty()
 
     results = []
     for year, month in periods:
         label = f"{year}-{month:02d}"
+        status_placeholder.info(f"{year}년 {month}월 계산중입니다.")
         try:
-            local_dfs = compute_base_dfs_from_sheets(base_sheets, year, month)
+            local_dfs = compute_base_dfs_from_sheets(base_sheets, year, month, quiet=True)
             product_id_df = collect_product_ids(local_dfs, year, month)
 
             purchase_cost_sheet_dfs = process_purchase_cost_sheets(
@@ -1653,6 +1686,7 @@ def run_batch_periods(
         except Exception as exc:
             results.append({"결산연월": label, "건수": 0, "상태": f"오류: {exc}"})
 
+    status_placeholder.empty()
     return results
 
 
@@ -2184,7 +2218,7 @@ with tab2:
     dfs, product_id_df, base_sheets = render_base_upload(settlement_year, settlement_month)
 
     st.divider()
-    st.subheader("원가금액")
+    render_section_heading("매출원가")
     purchase_cost_sheet_dfs, purchase_cost_sheets_raw = render_purchase_cost_upload(
         product_id_df, dfs, settlement_year, settlement_month,
     )
@@ -2213,44 +2247,29 @@ with tab2:
         combined_cost_driver_df=combined_cost_driver_df,
     )
 
-    # 최종 마스터 저장 (서버 공용 — VIEW 탭에서 누구나 조회 가능)
+    # 최종 마스터 저장 — 선택한 기준연/월부터, 업로드된 데이터에 있는 마지막 달까지 전부 처리.
+    # (중간 달이 바뀌면 그 뒤 달도 전부 다시 계산해야 하므로, 선택한 달 하나만이 아니라
+    # 그 이후 달을 전부 순서대로 다시 계산 후 저장한다 — 기초재고는 바로 앞 달 계산 결과를
+    # 자동으로 이어받는다.)
     st.divider()
     if final_cost_df is not None and not final_cost_df.empty:
-        if st.button("💾 최종 마스터 저장", key="save_final_master", type="primary"):
-            saved_at, total_rows, new_rows, replaced_rows = save_final_master(final_cost_df)
-            added_rows = new_rows - replaced_rows
-            st.success(
-                f"최종 마스터가 저장되었습니다. ({saved_at})\n\n"
-                f"이번 빌드: {new_rows:,}건 (신규 추가 {added_rows:,}건, 기존 교체 {replaced_rows:,}건)\n"
-                f"누적 마스터 총 {total_rows:,}건. VIEW 탭에서 확인하세요."
-            )
-    else:
-        st.caption("최종 원가 데이터가 생성되면 '최종 마스터 저장' 버튼이 활성화됩니다.")
-
-    # 여러 달 일괄 처리 (업로드된 원가대상 데이터에서 연/월을 자동 감지해 순차 계산 + 저장)
-    st.divider()
-    st.subheader("월별 데이터 일괄 계산")
-    available_periods = detect_available_periods(base_sheets)
-    if not available_periods:
-        st.caption(
-            "원가대상 파일을 업로드하면 그 안에 있는 연/월을 자동으로 찾아, "
-            "결산연/월을 매번 바꾸지 않고 한 번에 순차 처리할 수 있습니다."
-        )
-    else:
-        period_labels = ", ".join(f"{y}-{m:02d}" for y, m in available_periods)
-        st.caption(f"업로드된 데이터에서 감지된 연/월 ({len(available_periods)}개): {period_labels}")
-        st.caption(
-            "가장 이른 달부터 순서대로 계산 후 즉시 저장합니다. "
-            "각 달의 기초재고는 바로 앞 달 계산 결과(기말재고)를 자동으로 이어받습니다."
-        )
-        if st.button("계산 실행", key="run_batch_periods"):
-            with st.spinner(f"{len(available_periods)}개월 순차 처리 중..."):
+        if st.button("기준월부터 재계산", key="save_final_master", type="primary"):
+            available_periods = detect_available_periods(base_sheets)
+            periods_from_selected = [
+                p for p in available_periods if p >= (settlement_year, settlement_month)
+            ] or [(settlement_year, settlement_month)]
+            with st.spinner(f"{len(periods_from_selected)}개월 처리 중..."):
                 batch_results = run_batch_periods(
                     base_sheets, purchase_cost_sheets_raw, manufacturing_sheets_raw,
-                    cost_driver_sheets_raw, verification_sheets, available_periods,
+                    cost_driver_sheets_raw, verification_sheets, periods_from_selected,
                 )
             st.dataframe(pd.DataFrame(batch_results), use_container_width=True, hide_index=True)
             if any(str(r["상태"]).startswith("오류") for r in batch_results):
                 st.warning("일부 기간에서 오류가 발생했습니다. 위 표를 확인하세요.")
             else:
-                st.success("일괄 처리가 완료되었습니다. VIEW 탭에서 결과를 확인하세요.")
+                st.success(
+                    f"{settlement_year}년 {settlement_month}월부터 {len(periods_from_selected)}개월치 "
+                    "최종 마스터가 저장되었습니다. VIEW 탭에서 확인하세요."
+                )
+    else:
+        st.caption("최종 원가 데이터가 생성되면 '기준월부터 재계산' 버튼이 활성화됩니다.")

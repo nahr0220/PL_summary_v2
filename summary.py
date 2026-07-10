@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os
 
 import cost_summary_builder as _cost_summary_builder
+import sales_master_store as _sales_master_store
 
 st.set_page_config(page_title="summary 산출 시스템", layout="wide")
 
@@ -50,23 +50,6 @@ def _build_sales_division_id(sales_type_series, product_id_series):
     return st_clean + "_" + id_clean
 
 
-@st.cache_data(show_spinner=False, max_entries=2)
-def _read_excel_cached(path, mtime, sheet_name=None):
-    """파일 수정시간을 캐시 키에 포함해 같은 엑셀 반복 읽기를 줄인다.
-
-    max_entries 를 작게 유지해 큰 DataFrame 버전이 서버 메모리에 계속 쌓이지 않게 함.
-
-    parquet 면 그대로 읽고(sheet_name 무시), xlsx 면 calamine → openpyxl 순으로 폴백."""
-    if str(path).lower().endswith(".parquet"):
-        return pd.read_parquet(path)
-    for engine in ("calamine", "openpyxl"):
-        try:
-            if sheet_name is None:
-                return pd.read_excel(path, engine=engine)
-            return pd.read_excel(path, sheet_name=sheet_name, engine=engine)
-        except Exception:
-            continue
-    raise RuntimeError(f"엑셀 파일을 읽을 수 없습니다: {path}")
 
 
 def _memoize(cache_name, fingerprint, compute_fn):
@@ -243,11 +226,13 @@ def merge_cost_into_master(master_df, final_df):
 tab1, = st.tabs(["VIEW"])
 
 with tab1:
-    master_file = "master_pnl.xlsx"
     exclude_cols = ['번호', '매입유형1', '매입유형2', '매입유형3', '매입처', '매입지점', '매입사원', '도/소매구분']
 
-    if os.path.exists(master_file) and os.path.getsize(master_file) > 0:
-        master_df = _read_excel_cached(master_file, os.path.getmtime(master_file), None)
+    master_df, _sales_master_saved_at = _memoize(
+        "sales_master", _sales_master_store.master_state_fingerprint(),
+        lambda: _sales_master_store.read_sales_master(),
+    )
+    if master_df is not None and not master_df.empty:
         master_df = master_df.drop(columns=exclude_cols, errors='ignore')
         master_df['구분자'] = np.where(
             master_df['상품/위탁'] == '상품',
@@ -827,12 +812,11 @@ with tab1:
                     filtered_df.to_excel(writer, index=False, sheet_name="차량별 손익현황")
                 return buf.getvalue()
 
-            _master_mtime = os.path.getmtime(master_file) if os.path.exists(master_file) else None
             st.download_button(
                 "차량별 손익현황 다운로드",
                 data=_memoize(
                     "vehicle_pl_download",
-                    (_master_mtime, len(filtered_df), start_key, end_key),
+                    (_sales_master_saved_at, len(filtered_df), start_key, end_key),
                     _build_vehicle_pl_excel_bytes,
                 ),
                 file_name="차량별_손익현황.xlsx",

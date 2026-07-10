@@ -19,6 +19,8 @@ from datetime import date, datetime
 import numpy as np
 import pandas as pd
 
+import sales_master_store as _sales_master_store
+
 # 제조경비 배부 내역을 모듈 레벨에도 저장 (df.attrs 가 pandas 연산/캐시로 사라질 때 대비)
 _LAST_MANUFACTURING_EXPENSE_DIAGNOSTICS = []
 _LAST_MATERIAL_ALLOCATION_DIAGNOSTICS = []
@@ -1798,74 +1800,13 @@ def _append_total_purchase_cost_columns(final_df):
     return final_df
 
 
-@functools.lru_cache(maxsize=2)
-def _load_master_pnl_product_id_counts_cached(path, mtime, size):
-    """_load_master_pnl_product_id_counts 의 실제 계산부.
-
-    (path, mtime, size) 가 같으면(파일이 안 바뀌었으면) 재계산하지 않음 — 결산월 일괄
-    처리 시 같은 master_pnl.xlsx 를 매 결산월마다 다시 읽고 그룹핑하지 않게 하기 위함."""
-    try:
-        df = pd.read_excel(path)
-    except Exception:
-        return {}
-
-    df = _strip_columns(df)
-    id_column = next(
-        (c for c in ["상품ID", "상품아이디", "차량아이디", "CODE"] if c in df.columns),
-        None,
-    )
-    if id_column is None:
-        return {}
-
-    year_column = next(
-        (c for c in ["판매연도", "판매년도", "매출연도", "매출년도", "연도", "년도"]
-         if c in df.columns),
-        None,
-    )
-    month_column = next(
-        (c for c in ["판매월", "판매달", "매출월", "월"] if c in df.columns),
-        None,
-    )
-
-    work = pd.DataFrame()
-    work["상품ID"] = df[id_column].astype(str).str.strip()
-    work["연"] = pd.to_numeric(df[year_column], errors="coerce") if year_column else pd.NA
-    work["월"] = pd.to_numeric(df[month_column], errors="coerce") if month_column else pd.NA
-    work = work[work["상품ID"].ne("")]
-    if work.empty:
-        return {}
-
-    result = {}
-    grouped = work.groupby(["상품ID", "연", "월"], dropna=False).size()
-    for (pid, year, month), count in grouped.items():
-        year_int = int(year) if pd.notna(year) else None
-        month_int = int(month) if pd.notna(month) else None
-        result[(pid, year_int, month_int)] = int(count)
-    return result
-
-
 def _load_master_pnl_product_id_counts(settlement_year=None, settlement_month=None):
-    """코드와 같은 위치의 master_pnl.xlsx 에서 (상품ID, 판매연도, 판매월) 조합별 개수 반환.
+    """판매 마스터(SQLite)에서 (상품ID, 판매연도, 판매월) 조합별 개수 반환.
 
     반환: {(상품ID, 연, 월): 개수}. 각 상품 행의 (회계연도, 회계월) 로 매칭한다.
-    파일 없거나 상품ID 컬럼 없으면 {}.
+    마스터가 없거나 상품ID 컬럼 없으면 {}.
     """
-    import os
-
-    candidates = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_pnl.xlsx"),
-        "master_pnl.xlsx",
-    ]
-    path = next((p for p in candidates if os.path.exists(p)), None)
-    if path is None:
-        return {}
-
-    try:
-        stat = os.stat(path)
-    except OSError:
-        return {}
-
-    return _load_master_pnl_product_id_counts_cached(path, stat.st_mtime, stat.st_size)
+    return _sales_master_store.get_product_id_period_counts()
 
 
 # ============================================================

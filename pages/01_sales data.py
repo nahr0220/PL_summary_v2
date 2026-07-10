@@ -8,6 +8,8 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import os
 
+import sales_master_store as _sales_master_store
+
 
 def _files_fingerprint(files):
     """업로드 파일(들)의 지문. 내용 대신 file_id/이름/크기만 사용(가볍고 충분히 유일함)."""
@@ -37,16 +39,10 @@ def _memoize(cache_name, fingerprint, compute_fn):
 
 
 @st.cache_data(show_spinner=False, max_entries=2)
-def _read_master_pnl_cached(path, mtime):
-    """master_pnl 읽기 (mtime 을 캐시 키로 사용) — VIEW 탭 리런마다 재파싱하지 않도록 함.
-
-    parquet 면 그대로 읽고(제일 빠름), xlsx 면 calamine → openpyxl 순으로 폴백."""
-    if str(path).lower().endswith(".parquet"):
-        return pd.read_parquet(path)
-    try:
-        return pd.read_excel(path, engine="calamine")
-    except Exception:
-        return pd.read_excel(path)
+def _read_sales_master_cached(fingerprint):
+    """판매 마스터 읽기 (마스터 저장 지문을 캐시 키로 사용) — VIEW 탭 리런마다 재읽기하지 않도록 함."""
+    df, saved_at = _sales_master_store.read_sales_master()
+    return df, saved_at
 
 def mask_value(value):
     # 값이 없거나 NaN인 경우 빈 문자열 처리
@@ -205,23 +201,19 @@ st.title("Sales Data")
 tab1, tab2 = st.tabs(["VIEW", "UPLOAD"])
 
 with tab1:  # VIEW (매출요약정보)
-    # parquet 가 있으면 우선 사용(더 빠름), 없으면 기존 xlsx 마스터를 그대로 사용
-    master_file = "master_pnl.parquet" if os.path.exists("master_pnl.parquet") else "master_pnl.xlsx"
-    if os.path.exists(master_file) and os.path.getsize(master_file) > 0:
+    _sales_master_fingerprint = _sales_master_store.master_state_fingerprint()
+    master_df, _master_saved_at = _read_sales_master_cached(_sales_master_fingerprint)
+    if master_df is not None and not master_df.empty:
 
-        master_df = _read_master_pnl_cached(master_file, os.path.getmtime(master_file))
-
-        # ✅ 최근 업데이트 시간 (데이터 내 컬럼 혹은 파일 시스템의 수정 시간 기준)
+        # ✅ 최근 업데이트 시간 (데이터 내 updated_at 컬럼 우선, 없으면 마스터 저장 시각)
         try:
             # 'updated_at' 컬럼이 있고, 비어있지 않은 경우
             if 'updated_at' in master_df.columns and not master_df['updated_at'].isna().all():
                 last_updated = pd.to_datetime(master_df['updated_at']).max().strftime('%Y-%m-%d %H:%M:%S')
             else:
                 raise ValueError("updated_at column is empty or missing valid data") # 강제로 except 블록으로 이동
-        except Exception: # 컬럼 누락, 데이터 오류 등 모든 예외 상황에서 파일 시스템 시간으로 대체
-            # 컬럼이 없거나 에러 시 파일의 실제 수정 시간 표시
-            mtime = os.path.getmtime(master_file)
-            last_updated = datetime.fromtimestamp(mtime, tz=ZoneInfo("Asia/Seoul")).strftime('%Y-%m-%d %H:%M:%S')
+        except Exception: # 컬럼 누락, 데이터 오류 등 모든 예외 상황에서 마스터 저장 시각으로 대체
+            last_updated = _master_saved_at or "-"
 
         col_space, col_btn = st.columns([8, 2])
         with col_btn:
@@ -237,9 +229,7 @@ with tab1:  # VIEW (매출요약정보)
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("✅ 삭제", use_container_width=True):
-                    for _f in ("master_pnl.parquet", "master_pnl.xlsx"):
-                        if os.path.exists(_f):
-                            os.remove(_f)
+                    _sales_master_store.delete_sales_master()
                     st.session_state['delete_confirm'] = False
                     st.rerun()
             with c2:
@@ -419,7 +409,7 @@ with tab1:  # VIEW (매출요약정보)
             # 마스터 파일·필터가 안 바뀌면 재생성하지 않음 (전체 워크북 생성은 메모리를 꽤 씀)
             _memoize(
                 "view_sales_download",
-                (os.path.getmtime(master_file), tuple(sorted(s_yrs)), tuple(sorted(s_mths))),
+                (_sales_master_fingerprint, tuple(sorted(s_yrs)), tuple(sorted(s_mths))),
                 lambda: to_excel_with_format(d_df[display_cols], highlight_after_col=">>컬럼구분>>"),
             ),
             f"sales_summary_{datetime.now().strftime('%Y%m%d')}.xlsx",
@@ -579,7 +569,7 @@ with tab2: # UPLOAD
             col_save, _ = st.columns([2, 8])
             with col_save:
                 if st.button("VIEW 반영", use_container_width=True, type="primary"):
-                    fname, v_err = save_to_master(f_df, verify_file=v_file)
+                    _saved_at, v_err = save_to_master(f_df, verify_file=v_file)
                     if v_err:
                         st.warning(f"⚠️ 저장되었으나 검증은 스킵되었습니다.\n사유: {v_err}")
                         if "xlrd" in v_err:

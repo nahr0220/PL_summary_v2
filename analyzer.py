@@ -1,24 +1,10 @@
 import pandas as pd
 import numpy as np
-import os
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-def _sanitize_for_parquet(df):
-    """parquet 저장 전, 한 컬럼 안에 타입이 섞여있으면(엑셀은 허용하지만 parquet는 저장을
-    거부함) 그 컬럼만 문자열로 통일한다. 다운스트림에서 이미 pd.to_datetime/pd.to_numeric
-    (errors='coerce')로 방어적으로 다시 변환하는 패턴이라 안전하다."""
-    df = df.copy()
-    for col in df.columns:
-        if df[col].dtype != object:
-            continue
-        non_null = df[col].dropna()
-        if non_null.empty:
-            continue
-        if len(non_null.map(type).unique()) > 1:
-            df[col] = df[col].map(lambda v: v if pd.isna(v) else str(v))
-    return df
+import sales_master_store as _sales_master_store
 
 
 def distribute_indirect_cost(df, merged_df, category_name, col_name, target_mask=None, use_month_match=True):
@@ -255,61 +241,11 @@ def compute_verification(df, verify_file=None):
             verify_error = str(e)
     return df, verify_error
 
-def save_to_master(new_df, verify_file=None, file_name="master_pnl.parquet"):
-    """판매 마스터 저장. parquet 로 저장(엑셀보다 훨씬 빠르고 가벼움).
+def save_to_master(new_df, verify_file=None):
+    """판매 마스터 저장 (SQLite, sales_master_store.save_sales_master).
 
-    기존에 master_pnl.xlsx 로 저장되어 있던 데이터가 있으면(parquet 가 아직 없는 최초 1회)
-    자동으로 읽어들여 그대로 parquet 로 이관 저장한다."""
+    해당 판매월만 새 데이터로 교체 + 나머지 유지하는 누적 로직은
+    sales_master_store._accumulate_sales_master_data 가 담당."""
     new_df, verify_error = compute_verification(new_df, verify_file)
-    # 기존코드
-    # if os.path.exists(file_name):
-    #     old_df = pd.read_excel(file_name)
-    #     combined_df = pd.concat([old_df, new_df], ignore_index=True)
-    #     combined_df = combined_df.drop_duplicates(subset=['상품ID'], keep='last')
-    # else:
-    #     combined_df = new_df
-    # 해당월만 새로 업데이트로 수정
-    legacy_file_name = (
-        file_name[: -len(".parquet")] + ".xlsx" if file_name.endswith(".parquet") else None
-    )
-    if os.path.exists(file_name):
-        old_df = pd.read_parquet(file_name) if file_name.endswith(".parquet") else pd.read_excel(file_name)
-    elif legacy_file_name and os.path.exists(legacy_file_name):
-        old_df = pd.read_excel(legacy_file_name)  # 최초 1회: 기존 xlsx 마스터에서 이관
-    else:
-        old_df = None
-
-    if old_df is not None:
-        # 판매월 컬럼 숫자형 정리
-        old_df["판매월"] = pd.to_numeric(old_df["판매월"], errors="coerce")
-        new_df["판매월"] = pd.to_numeric(new_df["판매월"], errors="coerce")
-
-        # 새 데이터에 포함된 판매월 목록 추출
-        update_months = new_df["판매월"].dropna().unique()
-
-        # 기존 데이터에서 새 데이터에 포함된 판매월 삭제
-        old_df = old_df[~old_df["판매월"].isin(update_months)]
-
-        # 기존 데이터 + 새 데이터 결합
-        combined_df = pd.concat([old_df, new_df], ignore_index=True)
-
-    else:
-        combined_df = new_df
-
-    # '>>컬럼구분>>'를 '판매연도' 바로 왼쪽으로 강제 정렬 (기존 master 순서에 영향받지 않도록)
-    if ">>컬럼구분>>" in combined_df.columns and "판매연도" in combined_df.columns:
-        cols = [c for c in combined_df.columns if c != ">>컬럼구분>>"]
-        idx = cols.index("판매연도")
-        cols = cols[:idx] + [">>컬럼구분>>"] + cols[idx:]
-        combined_df = combined_df[cols]
-
-    # 'updated_at'은 항상 맨 마지막 컬럼으로
-    if "updated_at" in combined_df.columns:
-        cols = [c for c in combined_df.columns if c != "updated_at"] + ["updated_at"]
-        combined_df = combined_df[cols]
-
-    if file_name.endswith(".parquet"):
-        _sanitize_for_parquet(combined_df).to_parquet(file_name, index=False)
-    else:
-        combined_df.to_excel(file_name, index=False)
-    return file_name, verify_error
+    saved_at, _total_rows = _sales_master_store.save_sales_master(new_df)
+    return saved_at, verify_error

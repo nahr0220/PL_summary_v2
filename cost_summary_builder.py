@@ -2094,20 +2094,42 @@ def master_state_fingerprint():
         conn.close()
 
 
-@functools.lru_cache(maxsize=2)
-def _read_full_master_df_cached(fingerprint):
+@functools.lru_cache(maxsize=8)
+def _read_master_df_for_period_cached(fingerprint, year, month):
     conn = _get_master_db_connection()
     try:
         if not _master_table_exists(conn):
             return None
-        return pd.read_sql(f"SELECT * FROM {MASTER_TABLE_NAME}", conn)
+        cols = [row[1] for row in conn.execute(f'PRAGMA table_info("{MASTER_TABLE_NAME}")')]
+        if "회계연도" not in cols or "회계월" not in cols:
+            return None
+        # CAST 로 양쪽을 숫자로 맞춰서 비교 -- SQLite는 값 단위로 저장 타입이 달라질 수 있어서
+        # (같은 컬럼이어도 어떤 행은 정수, 어떤 행은 실수로 들어있을 수 있음) 그냥 "=?" 비교만 하면
+        # 타입이 다른 행이 안 걸릴 수 있다. pandas 쪽 pd.to_numeric(errors="coerce") 필터링과 동일한 의미.
+        return pd.read_sql(
+            f'SELECT * FROM {MASTER_TABLE_NAME} '
+            f'WHERE CAST("회계연도" AS INTEGER)=? AND CAST("회계월" AS INTEGER)=?',
+            conn, params=(year, month),
+        )
     finally:
         conn.close()
 
 
-def _read_full_master_df():
-    """누적 마스터 전체를 DataFrame 으로 반환 (없으면 None). 마스터가 바뀌지 않았으면 캐시 재사용."""
-    return _read_full_master_df_cached(master_state_fingerprint())
+def _read_master_df_for_period(year, month):
+    """마스터에서 특정 (회계연도, 회계월) 행만 SQL 단계에서 걸러서 읽기.
+
+    _get_previous_master_* 계열 함수들은 항상 '직전월 한 달치'만 필요한데, 예전에는
+    마스터 전체를 읽은 다음 pandas 에서 걸러냈다 -- 마스터가 누적될수록 매번 전체 테이블을
+    읽는 비용이 커져서(UPLOAD 탭 진입 시 체감 지연의 주 원인), SQL WHERE 절로 필요한 달만
+    가져오도록 좁힌 버전. 몇 달치가 쌓이든 이 함수의 비용은 '한 달치' 크기로 고정된다.
+    """
+    if year is None or month is None:
+        return None
+    try:
+        year, month = int(year), int(month)
+    except (TypeError, ValueError):
+        return None
+    return _read_master_df_for_period_cached(master_state_fingerprint(), year, month)
 
 
 def _accumulate_master_data(existing_df, new_df):
@@ -2246,16 +2268,10 @@ def _get_previous_master_prepaid_product_ids(settlement_year, settlement_month):
     else:
         prev_year, prev_month = settle_year, settle_month - 1
 
-    master_df = _read_full_master_df()
-    if master_df is None or master_df.empty:
+    prev_rows = _read_master_df_for_period(prev_year, prev_month)
+    if prev_rows is None or prev_rows.empty:
         return set()
-    if not {"회계연도", "회계월", "상품ID"}.issubset(master_df.columns):
-        return set()
-
-    yr = pd.to_numeric(master_df["회계연도"], errors="coerce")
-    mo = pd.to_numeric(master_df["회계월"], errors="coerce")
-    prev_rows = master_df[yr.eq(prev_year) & mo.eq(prev_month)].copy()
-    if prev_rows.empty:
+    if not {"상품ID"}.issubset(prev_rows.columns):
         return set()
 
     prepaid_column = next(
@@ -2285,24 +2301,12 @@ def _get_previous_master_cost_group_df(settlement_year, settlement_month):
     else:
         prev_year, prev_month = settle_year, settle_month - 1
 
-    master_df = _read_full_master_df()
+    rows = _read_master_df_for_period(prev_year, prev_month)
 
-    required = {"회계연도", "회계월", "상품ID", "매출구분"}
-    if master_df is None or master_df.empty or not required.issubset(master_df.columns):
+    required = {"상품ID", "매출구분"}
+    if rows is None or rows.empty or not required.issubset(rows.columns):
         return None
-
-    yr = pd.to_numeric(master_df["회계연도"], errors="coerce")
-    mo = pd.to_numeric(master_df["회계월"], errors="coerce")
-    sales_type = master_df["매출구분"].astype(str).str.strip()
-    rows = master_df[
-        yr.eq(prev_year)
-        & mo.eq(prev_month)
-    ].copy()
-    if rows.empty:
-        return None
-
-    if rows.empty:
-        return None
+    rows = rows.copy()
 
     source_to_target = {
         "재료비_누적합계": "재료비_전월누적",
@@ -2335,8 +2339,8 @@ def _build_inventory_df_from_master(settlement_year, settlement_month):
     """누적 마스터에서 직전월 데이터를 추출해 기초재고 시트 형식의 df 반환.
 
     1) settlement_year/month 의 직전월 계산 (1월→전년 12월)
-    2) 최신 cost_summary_*.xlsx 읽기 (없으면 None)
-    3) 마스터에서 (회계연도, 회계월) == 직전월 행 중 기말_수량 == 1 인 행 필터
+    2) SQLite 마스터에서 (회계연도, 회계월) == 직전월 행만 SQL 단계에서 필터해서 읽기 (없으면 None)
+    3) 그 중 기말_수량 == 1 인 행만 추출
     4) 컬럼 매핑: 누적합계 → _전월
     5) {전월}월 기말여부 = 1 으로 추가
 
@@ -2352,20 +2356,10 @@ def _build_inventory_df_from_master(settlement_year, settlement_month):
     else:
         prev_year, prev_month = settle_year, settle_month - 1
 
-    master_df = _read_full_master_df()
-    if master_df is None or master_df.empty:
+    prev_rows = _read_master_df_for_period(prev_year, prev_month)
+    if prev_rows is None or prev_rows.empty:
         return None
-
-    # 회계연도/회계월 필터
-    if "회계연도" not in master_df.columns or "회계월" not in master_df.columns:
-        return None
-
-    yr = pd.to_numeric(master_df["회계연도"], errors="coerce")
-    mo = pd.to_numeric(master_df["회계월"], errors="coerce")
-    prev_mask = yr.eq(prev_year) & mo.eq(prev_month)
-    prev_rows = master_df[prev_mask].copy()
-    if prev_rows.empty:
-        return None
+    prev_rows = prev_rows.copy()
 
     # 기말_수량 == 1 만 추출
     if "기말_수량" in prev_rows.columns:
@@ -2542,17 +2536,15 @@ def _append_inventory_quantity_amount_columns(
             _is_from_master = bool(getattr(inventory_df, "attrs", {}).get("_from_master_inventory"))
             if _is_from_master and "매출구분" in final_df.columns:
                 # 전월 마스터에서 직접 조회 후 전체 매출구분 대상으로 상품ID+매출구분 SUMIFS
-                _master_raw = _read_full_master_df()
-                if _master_raw is not None and not _master_raw.empty:
-                    _settle_year = int(settlement_year) if settlement_year else None
-                    _settle_month = int(settlement_month) if settlement_month else None
-                    if _settle_month == 1:
-                        _prev_year, _prev_month = _settle_year - 1, 12
-                    else:
-                        _prev_year, _prev_month = _settle_year, _settle_month - 1
-                    _yr = pd.to_numeric(_master_raw.get("회계연도"), errors="coerce")
-                    _mo = pd.to_numeric(_master_raw.get("회계월"), errors="coerce")
-                    _mrows = _master_raw[_yr.eq(_prev_year) & _mo.eq(_prev_month)].copy()
+                _settle_year = int(settlement_year) if settlement_year else None
+                _settle_month = int(settlement_month) if settlement_month else None
+                if _settle_month == 1:
+                    _prev_year, _prev_month = _settle_year - 1, 12
+                else:
+                    _prev_year, _prev_month = _settle_year, _settle_month - 1
+                _mrows = _read_master_df_for_period(_prev_year, _prev_month)
+                if _mrows is not None and not _mrows.empty:
+                    _mrows = _mrows.copy()
                     if not _mrows.empty and "기말_금액" in _mrows.columns:
                         _mrows["상품ID"] = _mrows["상품ID"].astype(str).str.strip()
                         _mrows["매출구분"] = _mrows["매출구분"].astype(str).str.strip()

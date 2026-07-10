@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import os
 
+import cost_summary_builder as _cost_summary_builder
+
 st.set_page_config(page_title="summary 산출 시스템", layout="wide")
 
 st.title("손익 분석 Summary")
@@ -81,49 +83,16 @@ def _memoize(cache_name, fingerprint, compute_fn):
 
 
 def load_final_cost_master():
-    """cost_summary_YYYYMMDD.xlsx 중 가장 최근 파일 불러오기.
+    """저장된 최종원가 마스터 불러오기 (SQLite, cost_summary_builder.read_final_master).
 
-    코드 같은 위치 또는 상위 폴더에서 'cost_summary_' 로 시작하는
-    .xlsx 파일을 찾아 가장 최근(파일명 정렬상 마지막) 것을 읽는다.
+    마스터가 안 바뀌었으면(저장 시각 지문 동일) 캐시된 결과를 재사용.
     """
-    import glob
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    parent = os.path.dirname(here)  # 부모 폴더 (코드가 pages 안에 있으면 앱 루트)
-    search_dirs = [parent, here, "."]
-
-    matched = []
-    for d in search_dirs:
-        try:
-            candidates = (
-                glob.glob(os.path.join(d, "cost_summary_*.parquet"))
-                + glob.glob(os.path.join(d, "cost_summary_*.xlsx"))
-            )
-            for p in candidates:
-                if os.path.exists(p) and os.path.getsize(p) > 0:
-                    matched.append(p)
-        except Exception:
-            pass
-
-    if not matched:
-        return None
-
-    # 파일명(날짜) 기준 최신 우선, 동률이면 수정시각 최신
-    def sort_key(path):
-        name = os.path.basename(path)
-        return (name, os.path.getmtime(path))
-
-    matched = sorted(set(matched), key=sort_key, reverse=True)
-    path = matched[0]
-
-    mtime = os.path.getmtime(path)
-    try:
-        return _read_excel_cached(path, mtime, "최종원가마스터")
-    except Exception:
-        try:
-            return _read_excel_cached(path, mtime, None)
-        except Exception:
-            return None
+    fingerprint = _cost_summary_builder.master_state_fingerprint()
+    return _memoize(
+        "final_cost_master",
+        fingerprint,
+        lambda: _cost_summary_builder.read_final_master()[0],
+    )
 
 
 def merge_cost_into_master(master_df, final_df):

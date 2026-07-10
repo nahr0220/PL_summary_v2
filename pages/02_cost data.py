@@ -90,16 +90,10 @@ def _files_fingerprint(files):
 
 
 def _master_file_state():
-    """현재 참조되는 누적 마스터 파일의 (경로, mtime). 저장으로 마스터가 바뀌면 캐시를 무효화하는 데 사용."""
+    """현재 마스터의 지문. 저장으로 마스터가 바뀌면 값이 달라져 캐시를 무효화하는 데 사용."""
     try:
-        path = _cost_summary_builder._find_latest_cost_summary_path()
+        return _cost_summary_builder.master_state_fingerprint()
     except Exception:
-        return None
-    if path is None:
-        return None
-    try:
-        return (path, os.path.getmtime(path))
-    except OSError:
         return None
 
 
@@ -1487,146 +1481,15 @@ def render_final_cost(
 st.set_page_config(page_title="손익분석", layout="wide")
 st.title("Cost Data")
 
-# 최종 마스터 저장 경로 (코드와 같은 폴더, 서버 공용)
-import os as _os
-import glob as _glob
-
-
-def _master_dir():
-    """마스터 파일 저장 폴더 반환.
-
-    코드가 'pages/' 안에 있으면 그 부모 폴더(앱 루트)를 사용.
-    그 외에는 코드 같은 폴더를 사용.
-    """
-    here = _os.path.dirname(_os.path.abspath(__file__))
-    if _os.path.basename(here).lower() == "pages":
-        return _os.path.dirname(here)
-    return here
-
-
-MASTER_FILE_PATH = _os.path.join(
-    _master_dir(), f"cost_summary_{datetime.now().strftime('%Y%m%d')}.xlsx"
-)
-MASTER_META_PATH = _os.path.join(
-    _master_dir(), "final_cost_master_meta.txt"
-)
-
-# 누적 키: 이 조합이 같은 행은 새 데이터로 교체, 다른 행은 추가
-_MASTER_ACCUMULATION_KEYS = ["상품ID", "매출구분", "회계연도", "회계월"]
-
-
-def _find_latest_cost_summary_path():
-    """마스터 폴더에서 가장 최근 cost_summary_*.parquet(우선)/*.xlsx 경로 반환 (없으면 None)."""
-    here = _master_dir()
-    paths = (
-        _glob.glob(_os.path.join(here, "cost_summary_*.parquet"))
-        + _glob.glob(_os.path.join(here, "cost_summary_*.xlsx"))
-    )
-    matched = [
-        p for p in paths
-        if _os.path.exists(p) and _os.path.getsize(p) > 0
-    ]
-    if not matched:
-        return None
-    matched.sort(key=lambda p: _os.path.basename(p), reverse=True)
-    return matched[0]
-
-
-def _read_existing_master_df():
-    """최신 cost_summary_*.xlsx 를 읽어 반환 (없으면 None).
-
-    cost_summary_builder 의 캐시된 리더를 재사용 — 같은 파일을 또 다른 독립 경로로
-    (openpyxl 재파싱해서) 중복으로 읽지 않도록 함."""
-    path = _find_latest_cost_summary_path()
-    if path is None:
-        return None
-    return _cost_summary_builder._read_master_df(path)
-
-
-def _accumulate_master_data(existing_df, new_df):
-    """기존 마스터에 새 데이터를 누적.
-
-    키 = (상품ID, 매출구분, 회계연도, 회계월). 같은 키 행은 새 데이터로 교체.
-    없는 키 행은 추가. 컬럼은 합집합.
-    반환: (누적 df, 교체된 행 수)
-    """
-    if existing_df is None or existing_df.empty:
-        return new_df.copy(), 0
-
-    for c in _MASTER_ACCUMULATION_KEYS:
-        if c not in existing_df.columns or c not in new_df.columns:
-            return new_df.copy(), 0
-
-    def _normalize_keys(df):
-        df = df.copy()
-        for c in ["상품ID", "매출구분"]:
-            df[c] = df[c].astype(str).str.strip()
-        for c in ["회계연도", "회계월"]:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-        return df
-
-    existing_norm = _normalize_keys(existing_df)
-    new_norm = _normalize_keys(new_df)
-
-    new_keys = set(zip(
-        new_norm["상품ID"], new_norm["매출구분"],
-        new_norm["회계연도"], new_norm["회계월"],
-    ))
-    existing_keys = list(zip(
-        existing_norm["상품ID"], existing_norm["매출구분"],
-        existing_norm["회계연도"], existing_norm["회계월"],
-    ))
-    keep_mask = pd.Series(
-        [k not in new_keys for k in existing_keys], index=existing_norm.index,
-    )
-    kept = existing_norm[keep_mask]
-    replaced_count = int((~keep_mask).sum())
-
-    result = pd.concat([kept, new_norm], ignore_index=True, sort=False)
-    return result, replaced_count
-
-
-def _sanitize_for_parquet(df):
-    """parquet 저장 전, 한 컬럼 안에 타입이 섞여있으면(엑셀에서는 허용되지만 parquet는 저장을
-    거부함 — 예: 날짜 컬럼에 일부 행만 텍스트가 섞인 경우) 그 컬럼만 문자열로 통일한다.
-    다운스트림에서 이미 pd.to_datetime/pd.to_numeric(errors='coerce')로 방어적으로 다시
-    변환하는 패턴이라 안전하다."""
-    df = df.copy()
-    for col in df.columns:
-        if df[col].dtype != object:
-            continue
-        non_null = df[col].dropna()
-        if non_null.empty:
-            continue
-        if len(non_null.map(type).unique()) > 1:
-            df[col] = df[col].map(lambda v: v if pd.isna(v) else str(v))
-    return df
+# 최종 마스터 저장 (SQLite, cost_summary_builder.py 에 저장소 로직을 통합)
+# 이 페이지에서는 얇은 위임 함수만 두고, 실제 저장/조회/삭제/락(트랜잭션) 로직은
+# cost_summary_builder.py 쪽에 있다 — 그 모듈의 내부 조회 함수들(_get_previous_master_*,
+# _build_inventory_df_from_master 등)도 같은 저장소를 읽어야 하므로 한 곳에 모아둔다.
 
 
 def save_final_master(final_cost_df):
-    """최종원가 결과를 누적해 서버에 저장 (공용).
-
-    1) 최신 cost_summary_*.parquet/xlsx 를 읽어 기존 마스터로 사용 (없으면 빈 시작)
-    2) 같은 (상품ID, 매출구분, 회계연도, 회계월) 행 교체 + 나머지 추가
-    3) 컬럼은 합집합으로 처리
-    4) 오늘 날짜 파일(cost_summary_YYYYMMDD.parquet) 로 저장 — parquet 가 xlsx보다 훨씬
-       빠르고 가벼워서 새 저장은 parquet로 나감 (기존 xlsx 는 계속 읽기 지원)
-
-    반환: (저장 시각, 누적 후 총 행 수, 이번 빌드 행 수, 교체된 행 수)
-    """
-    saved_at = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    existing = _read_existing_master_df()
-    merged, replaced = _accumulate_master_data(existing, final_cost_df)
-
-    today_path = _os.path.join(
-        _master_dir(),
-        f"cost_summary_{datetime.now().strftime('%Y%m%d')}.parquet",
-    )
-    _sanitize_for_parquet(merged).to_parquet(today_path, index=False)
-    with open(MASTER_META_PATH, "w", encoding="utf-8") as f:
-        f.write(saved_at)
-    return saved_at, len(merged), len(final_cost_df), replaced
+    """최종원가 결과를 누적해 서버에 저장 (공용). 반환: (저장 시각, 누적 후 총 행 수, 이번 빌드 행 수, 교체된 행 수)."""
+    return _cost_summary_builder.save_final_master(final_cost_df)
 
 
 def run_batch_periods(
@@ -1690,70 +1553,14 @@ def run_batch_periods(
     return results
 
 
-@st.cache_data(show_spinner=False, max_entries=2)
-def _read_master_excel_cached(path, mtime):
-    """엑셀 마스터 읽기 (파일 수정시각 mtime 을 캐시 키로 사용).
-
-    max_entries 를 작게 유지해 큰 마스터 DataFrame 버전이 서버 메모리에 계속 쌓이지 않게 함.
-
-    parquet 면 그대로 읽고, xlsx 면 calamine → openpyxl 순으로 폴백."""
-    if str(path).lower().endswith(".parquet"):
-        return pd.read_parquet(path)
-    for engine in ("calamine", "openpyxl"):
-        try:
-            return pd.read_excel(path, sheet_name="최종원가마스터", engine=engine)
-        except Exception:
-            try:
-                return pd.read_excel(path, engine=engine)
-            except Exception:
-                continue
-    raise RuntimeError(f"마스터 파일을 읽을 수 없습니다: {path}")
-
-
 def load_final_master():
-    """저장된 최종원가 결과(엑셀) 불러오기. (df, 저장시각) 또는 (None, None).
-
-    최신 cost_summary_*.xlsx 를 찾아 읽는다.
-    """
-    path = _find_latest_cost_summary_path()
-    if path is None:
-        return None, None
-    try:
-        mtime = _os.path.getmtime(path)
-        df = _read_master_excel_cached(path, mtime)
-    except Exception:
-        return None, None
-    saved_at = None
-    if _os.path.exists(MASTER_META_PATH):
-        try:
-            with open(MASTER_META_PATH, "r", encoding="utf-8") as f:
-                saved_at = f.read().strip()
-        except Exception:
-            saved_at = None
-    return df, saved_at
+    """저장된 최종원가 마스터 불러오기. (df, 저장시각) 또는 (None, None)."""
+    return _cost_summary_builder.read_final_master()
 
 
 def delete_final_master():
-    """모든 cost_summary_*.parquet/xlsx 파일과 메타 삭제. 삭제 성공 여부 반환."""
-    deleted = False
-    here = _master_dir()
-    paths = (
-        _glob.glob(_os.path.join(here, "cost_summary_*.parquet"))
-        + _glob.glob(_os.path.join(here, "cost_summary_*.xlsx"))
-    )
-    for path in paths:
-        try:
-            _os.remove(path)
-            deleted = True
-        except Exception:
-            pass
-    if _os.path.exists(MASTER_META_PATH):
-        try:
-            _os.remove(MASTER_META_PATH)
-            deleted = True
-        except Exception:
-            pass
-    return deleted
+    """마스터 데이터 전체 삭제. 삭제 성공 여부 반환."""
+    return _cost_summary_builder.delete_final_master()
 
 
 # ----- 회계처리 표 -----
@@ -2054,16 +1861,6 @@ with tab1:
     master_df, master_saved_at = load_final_master()
 
     if master_df is not None:
-        if not master_saved_at:
-            try:
-                _latest_path = _cost_summary_builder._find_latest_cost_summary_path()
-                if _latest_path is not None:
-                    master_saved_at = datetime.fromtimestamp(
-                        _os.path.getmtime(_latest_path)
-                    ).strftime('%Y-%m-%d %H:%M:%S')
-            except Exception:
-                pass
-
         col_space, col_btn = st.columns([8, 2])
         with col_btn:
             if st.button(

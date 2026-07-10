@@ -13,6 +13,8 @@
 import functools
 import os
 import re
+import sqlite3
+from datetime import date, datetime
 
 import numpy as np
 import pandas as pd
@@ -1893,13 +1895,32 @@ _MASTER_TO_INVENTORY_DETAIL_COLUMNS = [
 ]
 
 
-def _find_latest_cost_summary_path():
-    """가장 최근 cost_summary_*.parquet(우선) 또는 *.xlsx 경로 반환 (없으면 None).
+# ===== 최종원가 마스터 저장소 (SQLite) =====
+#
+# 예전에는 cost_summary_YYYYMMDD.parquet/xlsx 파일을 매번 통째로 읽고 합치고
+# 다시 통째로 써서 누적했다. 이 방식은 여러 사용자가 거의 동시에 저장을 누르면
+# "읽기 → 합치기 → 쓰기" 구간이 원자적이지 않아 나중에 끝난 쓰기가 앞선 저장 내용을
+# (그 시점엔 없던 걸로 보고) 덮어써버리는 lost-update 문제가 있었다.
+# SQLite로 옮기면 트랜잭션(BEGIN IMMEDIATE)이 이 구간 전체를 원자적으로 만들어줘서
+# 같은 문제가 근본적으로 사라진다. 서버에 이미 저장된 예전 parquet/xlsx 파일은
+# 서버에 직접 접근할 수 없으므로, 앱이 최초 실행될 때 자동으로 SQLite로 가져온다
+# (_migrate_legacy_master_if_needed).
+
+MASTER_DB_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "cost_summary_master.db"
+)
+MASTER_TABLE_NAME = "final_cost_master"
+MASTER_META_TABLE_NAME = "final_cost_master_meta"
+
+# 누적 키: 이 조합이 같은 행은 새 데이터로 교체, 다른 행은 추가
+_MASTER_ACCUMULATION_KEYS = ["상품ID", "매출구분", "회계연도", "회계월"]
+
+
+def _legacy_master_file_path():
+    """(마이그레이션 전용) 예전 저장 방식인 cost_summary_*.parquet/xlsx 경로 반환 (없으면 None).
 
     빌더 파일 위치(앱 루트)를 먼저 검색하고, 그 다음 부모 폴더/현재 작업 디렉토리로 fallback.
-    parquet 가 더 빠르고 가벼워서 새 저장은 parquet로 나가고, 기존 xlsx 도 계속 읽을 수 있게 둘 다 검색.
     """
-    import os
     import glob
 
     here = os.path.dirname(os.path.abspath(__file__))
@@ -1927,14 +1948,10 @@ def _find_latest_cost_summary_path():
     return matched[0][0]
 
 
-@functools.lru_cache(maxsize=2)
-def _read_master_df_cached(path, mtime, size):
-    """(path, mtime, size)가 같으면 재사용 — 같은 실행/리런 내 중복 읽기 방지.
-
-    maxsize를 작게 유지해 큰 마스터 DataFrame이 여러 버전 메모리에 쌓이지 않게 함
-    (Streamlit Cloud 메모리 한도 대응).
-
-    parquet 면 그대로 읽고(제일 빠름), xlsx 면 calamine → openpyxl 순으로 시도."""
+def _read_legacy_master_file(path):
+    """(마이그레이션 전용) 예전 저장 방식 파일 하나를 읽어 DataFrame 반환."""
+    if path is None:
+        return None
     if str(path).lower().endswith(".parquet"):
         try:
             return pd.read_parquet(path)
@@ -1951,15 +1968,270 @@ def _read_master_df_cached(path, mtime, size):
     return None
 
 
-def _read_master_df(path):
-    """누적 마스터(cost_summary_*.xlsx)를 읽되, 파일이 바뀌지 않았으면 캐시된 결과를 재사용."""
-    if path is None:
+def _to_sql_native(value):
+    """DataFrame 셀 값을 sqlite3 모듈이 바로 바인딩할 수 있는 파이썬 기본 타입으로 변환.
+
+    numpy 스칼라(np.int64 등)는 sqlite3 가 못 알아먹고, Timestamp/NaN/NaT 도 그대로
+    바인딩할 수 없어서 각각 int/float/문자열/None 으로 통일해야 한다."""
+    if value is None:
+        return None
+    if isinstance(value, (pd.Timestamp, datetime, date)):
+        return value.isoformat()
+    if isinstance(value, np.floating):
+        value = float(value)
+    elif isinstance(value, np.integer):
+        return int(value)
+    elif isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, float) and pd.isna(value):
         return None
     try:
-        stat = os.stat(path)
-    except OSError:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return value
+
+
+def _write_master_table(conn, df):
+    """merged DataFrame 을 마스터 테이블에 통째로 다시 씀 (DROP + CREATE + INSERT).
+
+    pandas.DataFrame.to_sql 은 내부적으로 자체 commit 을 호출해버려서, 우리가 수동으로 연
+    BEGIN IMMEDIATE 트랜잭션을 중간에 끊어버린다 (그러면 '읽기→합치기→쓰기' 원자성이 깨짐).
+    그래서 여기서는 executemany 로 직접 써서 트랜잭션이 끝까지 우리 손 안에 있게 한다.
+    컬럼은 타입 선언 없이 만들어(SQLite affinity 없음) 값별 원래 타입을 그대로 보존한다."""
+    columns = list(df.columns)
+    conn.execute(f"DROP TABLE IF EXISTS {MASTER_TABLE_NAME}")
+    col_defs = ", ".join(f'"{c}"' for c in columns)
+    conn.execute(f"CREATE TABLE {MASTER_TABLE_NAME} ({col_defs})")
+    if not columns:
+        return
+    placeholders = ", ".join(["?"] * len(columns))
+    rows = [
+        tuple(_to_sql_native(v) for v in row)
+        for row in df.itertuples(index=False, name=None)
+    ]
+    if rows:
+        conn.executemany(
+            f"INSERT INTO {MASTER_TABLE_NAME} ({col_defs}) VALUES ({placeholders})", rows,
+        )
+
+
+def _master_table_exists(conn):
+    cur = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (MASTER_TABLE_NAME,),
+    )
+    return cur.fetchone() is not None
+
+
+def _migrate_legacy_master_if_needed(conn):
+    """예전 parquet/xlsx 마스터가 있으면 SQLite로 딱 한 번만 자동 가져온다.
+
+    meta 테이블에 'legacy_migrated' 플래그를 남겨, 이후 마스터를 초기화(delete)해도
+    예전 파일이 남아있다고 해서 다시 되살아나지 않게 한다 (한 번 확인했으면 끝)."""
+    conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {MASTER_META_TABLE_NAME} (key TEXT PRIMARY KEY, value TEXT)"
+    )
+    cur = conn.execute(
+        f"SELECT value FROM {MASTER_META_TABLE_NAME} WHERE key='legacy_migrated'"
+    )
+    if cur.fetchone() is not None:
+        return
+
+    legacy_path = _legacy_master_file_path()
+    if legacy_path is not None:
+        legacy_df = _read_legacy_master_file(legacy_path)
+        if legacy_df is not None and not legacy_df.empty:
+            _write_master_table(conn, legacy_df)
+            saved_at = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                meta_path = os.path.join(os.path.dirname(legacy_path), "final_cost_master_meta.txt")
+                if os.path.exists(meta_path):
+                    with open(meta_path, "r", encoding="utf-8") as f:
+                        text = f.read().strip()
+                        if text:
+                            saved_at = text
+            except Exception:
+                pass
+            conn.execute(
+                f"INSERT OR REPLACE INTO {MASTER_META_TABLE_NAME} (key, value) VALUES ('saved_at', ?)",
+                (saved_at,),
+            )
+
+    conn.execute(
+        f"INSERT OR REPLACE INTO {MASTER_META_TABLE_NAME} (key, value) VALUES ('legacy_migrated', '1')"
+    )
+    conn.commit()
+
+
+def _get_master_db_connection():
+    """마스터 SQLite DB 연결 반환 (필요 시 예전 파일에서 자동 마이그레이션 수행)."""
+    conn = sqlite3.connect(MASTER_DB_PATH, timeout=30)
+    conn.isolation_level = None  # 수동으로 BEGIN IMMEDIATE 트랜잭션을 제어하기 위해 autocommit 모드 사용
+    conn.execute("PRAGMA journal_mode=WAL")
+    _migrate_legacy_master_if_needed(conn)
+    return conn
+
+
+def master_state_fingerprint():
+    """마스터가 바뀌면 값이 달라지는 지문 (캐시 무효화용). 마스터가 없으면 None."""
+    try:
+        conn = _get_master_db_connection()
+    except Exception:
         return None
-    return _read_master_df_cached(path, stat.st_mtime, stat.st_size)
+    try:
+        if not _master_table_exists(conn):
+            return None
+        cur = conn.execute(
+            f"SELECT value FROM {MASTER_META_TABLE_NAME} WHERE key='saved_at'"
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+@functools.lru_cache(maxsize=2)
+def _read_full_master_df_cached(fingerprint):
+    conn = _get_master_db_connection()
+    try:
+        if not _master_table_exists(conn):
+            return None
+        return pd.read_sql(f"SELECT * FROM {MASTER_TABLE_NAME}", conn)
+    finally:
+        conn.close()
+
+
+def _read_full_master_df():
+    """누적 마스터 전체를 DataFrame 으로 반환 (없으면 None). 마스터가 바뀌지 않았으면 캐시 재사용."""
+    return _read_full_master_df_cached(master_state_fingerprint())
+
+
+def _accumulate_master_data(existing_df, new_df):
+    """기존 마스터에 새 데이터를 누적.
+
+    키 = (상품ID, 매출구분, 회계연도, 회계월). 같은 키 행은 새 데이터로 교체.
+    없는 키 행은 추가. 컬럼은 합집합.
+    반환: (누적 df, 교체된 행 수)
+    """
+    if existing_df is None or existing_df.empty:
+        return new_df.copy(), 0
+
+    for c in _MASTER_ACCUMULATION_KEYS:
+        if c not in existing_df.columns or c not in new_df.columns:
+            return new_df.copy(), 0
+
+    def _normalize_keys(df):
+        df = df.copy()
+        for c in ["상품ID", "매출구분"]:
+            df[c] = df[c].astype(str).str.strip()
+        for c in ["회계연도", "회계월"]:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        return df
+
+    existing_norm = _normalize_keys(existing_df)
+    new_norm = _normalize_keys(new_df)
+
+    new_keys = set(zip(
+        new_norm["상품ID"], new_norm["매출구분"],
+        new_norm["회계연도"], new_norm["회계월"],
+    ))
+    existing_keys = list(zip(
+        existing_norm["상품ID"], existing_norm["매출구분"],
+        existing_norm["회계연도"], existing_norm["회계월"],
+    ))
+    keep_mask = pd.Series(
+        [k not in new_keys for k in existing_keys], index=existing_norm.index,
+    )
+    kept = existing_norm[keep_mask]
+    replaced_count = int((~keep_mask).sum())
+
+    result = pd.concat([kept, new_norm], ignore_index=True, sort=False)
+    return result, replaced_count
+
+
+def save_final_master(final_cost_df):
+    """최종원가 결과를 누적해 SQLite 마스터에 저장 (공용).
+
+    BEGIN IMMEDIATE 트랜잭션으로 '읽기 → 합치기 → 쓰기' 구간 전체를 원자적으로 만들어,
+    여러 사용자가 거의 동시에 저장해도 서로 덮어쓰지 않는다 (SQLite가 두 번째 트랜잭션을
+    첫 번째가 끝날 때까지 자동으로 대기시킴).
+
+    반환: (저장 시각, 누적 후 총 행 수, 이번 빌드 행 수, 교체된 행 수)
+    """
+    saved_at = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(MASTER_DB_PATH, timeout=30)
+    conn.isolation_level = None
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        _migrate_legacy_master_if_needed(conn)
+
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = (
+                pd.read_sql(f"SELECT * FROM {MASTER_TABLE_NAME}", conn)
+                if _master_table_exists(conn) else None
+            )
+            merged, replaced = _accumulate_master_data(existing, final_cost_df)
+
+            _write_master_table(conn, merged)
+            conn.execute(
+                f"INSERT OR REPLACE INTO {MASTER_META_TABLE_NAME} (key, value) VALUES ('saved_at', ?)",
+                (saved_at,),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    finally:
+        conn.close()
+
+    return saved_at, len(merged), len(final_cost_df), replaced
+
+
+def read_final_master():
+    """저장된 최종원가 마스터 불러오기. (df, 저장시각) 또는 (None, None)."""
+    conn = _get_master_db_connection()
+    try:
+        if not _master_table_exists(conn):
+            return None, None
+        df = pd.read_sql(f"SELECT * FROM {MASTER_TABLE_NAME}", conn)
+        saved_at = None
+        try:
+            cur = conn.execute(
+                f"SELECT value FROM {MASTER_META_TABLE_NAME} WHERE key='saved_at'"
+            )
+            row = cur.fetchone()
+            saved_at = row[0] if row else None
+        except Exception:
+            pass
+        return df, saved_at
+    except Exception:
+        return None, None
+    finally:
+        conn.close()
+
+
+def delete_final_master():
+    """마스터 데이터 전체 삭제. 삭제 성공 여부 반환.
+
+    legacy_migrated 플래그는 지우지 않는다 — 지우면 예전 parquet/xlsx 파일이 남아있는 경우
+    다음 접근 때 다시 자동 마이그레이션되어 방금 지운 데이터가 되살아나 버린다."""
+    conn = _get_master_db_connection()
+    try:
+        deleted = False
+        if _master_table_exists(conn):
+            conn.execute(f"DROP TABLE {MASTER_TABLE_NAME}")
+            deleted = True
+        conn.execute(
+            f"DELETE FROM {MASTER_META_TABLE_NAME} WHERE key='saved_at'"
+        )
+        return deleted
+    finally:
+        conn.close()
 
 
 def _get_previous_master_prepaid_product_ids(settlement_year, settlement_month):
@@ -1974,10 +2246,7 @@ def _get_previous_master_prepaid_product_ids(settlement_year, settlement_month):
     else:
         prev_year, prev_month = settle_year, settle_month - 1
 
-    path = _find_latest_cost_summary_path()
-    if path is None:
-        return set()
-    master_df = _read_master_df(path)
+    master_df = _read_full_master_df()
     if master_df is None or master_df.empty:
         return set()
     if not {"회계연도", "회계월", "상품ID"}.issubset(master_df.columns):
@@ -2016,10 +2285,7 @@ def _get_previous_master_cost_group_df(settlement_year, settlement_month):
     else:
         prev_year, prev_month = settle_year, settle_month - 1
 
-    path = _find_latest_cost_summary_path()
-    if path is None:
-        return None
-    master_df = _read_master_df(path)
+    master_df = _read_full_master_df()
 
     required = {"회계연도", "회계월", "상품ID", "매출구분"}
     if master_df is None or master_df.empty or not required.issubset(master_df.columns):
@@ -2086,10 +2352,7 @@ def _build_inventory_df_from_master(settlement_year, settlement_month):
     else:
         prev_year, prev_month = settle_year, settle_month - 1
 
-    path = _find_latest_cost_summary_path()
-    if path is None:
-        return None
-    master_df = _read_master_df(path)
+    master_df = _read_full_master_df()
     if master_df is None or master_df.empty:
         return None
 
@@ -2278,9 +2541,8 @@ def _append_inventory_quantity_amount_columns(
             inv = inv[inv["상품ID"].ne("")]
             _is_from_master = bool(getattr(inventory_df, "attrs", {}).get("_from_master_inventory"))
             if _is_from_master and "매출구분" in final_df.columns:
-                # 전월 마스터 파일에서 직접 최신파일 쵬출 후 전체 매출구분 대상으로 상품ID+매출구분 SUMIFS
-                _path = _find_latest_cost_summary_path()
-                _master_raw = _read_master_df(_path) if _path is not None else None
+                # 전월 마스터에서 직접 조회 후 전체 매출구분 대상으로 상품ID+매출구분 SUMIFS
+                _master_raw = _read_full_master_df()
                 if _master_raw is not None and not _master_raw.empty:
                     _settle_year = int(settlement_year) if settlement_year else None
                     _settle_month = int(settlement_month) if settlement_month else None

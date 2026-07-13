@@ -864,11 +864,11 @@ def _normalize_ts_sheet(df, sheet_name):
 
 
 def _normalize_rqi_sheet(df, sheet_name):
-    """RQI 시트 → 통합 컬럼 매핑 (공정 컬럼이 있으면 그 값, 없으면 'RQI' 고정).
+    """RQI 시트 → 통합 컬럼 매핑 (구분 컬럼 값을 공정으로 사용, 없으면 공정 컬럼, 그것도 없으면 'RQI' 고정).
     컬럼: 차량번호, 차명, 작업시작일자, 작업시작시간, 작업종료일자, 작업종료시간, 담당자
     (구버전 파일은 시작/종료일자 구분 없이 '작업일자' 하나만 있어 fallback 으로 사용)
     """
-    process_value = _pick_first_existing(df, ["공정"], default="RQI")
+    process_value = _pick_first_existing(df, ["구분", "공정"], default="RQI")
     return pd.DataFrame({
         "공정": process_value,
         "차량번호": _pick_first_existing(df, ["차량번호"]),

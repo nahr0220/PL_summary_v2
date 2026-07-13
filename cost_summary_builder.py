@@ -1917,7 +1917,15 @@ def _to_sql_native(value):
     if value is None:
         return None
     if isinstance(value, (pd.Timestamp, datetime, date)):
-        return value.isoformat()
+        # 먼저 결측(NaT)인지 확인 -- 안 그러면 str(pd.NaT) == "NaT" 라는 문자열이 그대로
+        # 저장되어 화면에 "NaT" 글자가 찍혀버린다.
+        if pd.isna(value):
+            return None
+        # .isoformat()이 아니라 str()을 쓴다 -- isoformat()은 "2026-07-10T00:00:00"처럼
+        # T로 구분하는데, 화면 표시 로직(dataframe_for_display/_strip_zero_time)은
+        # 예전 parquet 시절부터 "2026-07-10 00:00:00"(공백 구분) 형식만 인식해서 시간을
+        # 지워왔다. str()은 그 공백 구분 형식을 그대로 만들어줘서 기존 로직과 호환된다.
+        return str(value)
     if isinstance(value, np.floating):
         value = float(value)
     elif isinstance(value, np.integer):

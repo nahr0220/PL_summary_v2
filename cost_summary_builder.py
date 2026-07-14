@@ -1964,6 +1964,16 @@ def _write_master_table(conn, df):
         conn.executemany(
             f"INSERT INTO {MASTER_TABLE_NAME} ({col_defs}) VALUES ({placeholders})", rows,
         )
+    # _read_master_df_for_period 가 매번 (회계연도,회계월)로 필터링해서 읽는데, 인덱스가
+    # 없으면 매번 테이블 전체를 스캔해야 한다. 대량 insert가 끝난 뒤 한 번에 만들어야
+    # insert 도중 인덱스를 매 행마다 갱신하는 비용이 안 든다.
+    # CAST(... AS INTEGER) 식 그대로 인덱스를 걸어야 그 WHERE 절(_read_master_df_for_period_cached
+    # 참고)에서 실제로 이 인덱스를 타게 된다 -- 원본 컬럼에만 인덱스를 걸면 CAST 때문에 안 먹힘.
+    if "회계연도" in columns and "회계월" in columns:
+        conn.execute(
+            f'CREATE INDEX IF NOT EXISTS idx_master_period ON {MASTER_TABLE_NAME} '
+            f'(CAST("회계연도" AS INTEGER), CAST("회계월" AS INTEGER))'
+        )
 
 
 def _master_table_exists(conn):
@@ -1974,11 +1984,23 @@ def _master_table_exists(conn):
     return cur.fetchone() is not None
 
 
+_legacy_migration_checked = False  # 프로세스 안에서 한 번만 확인하면 충분 (아래 함수 설명 참고)
+
+
 def _migrate_legacy_master_if_needed(conn):
     """예전 parquet/xlsx 마스터가 있으면 SQLite로 딱 한 번만 자동 가져온다.
 
     meta 테이블에 'legacy_migrated' 플래그를 남겨, 이후 마스터를 초기화(delete)해도
-    예전 파일이 남아있다고 해서 다시 되살아나지 않게 한다 (한 번 확인했으면 끝)."""
+    예전 파일이 남아있다고 해서 다시 되살아나지 않게 한다 (한 번 확인했으면 끝).
+
+    이 함수는 SQLite 연결을 열 때마다(즉 마스터를 읽거나 쓸 때마다) 매번 호출되는데,
+    원래는 그때마다 CREATE TABLE IF NOT EXISTS + SELECT 를 다시 실행했다. 한 번
+    확인되면(=legacy_migrated 플래그가 세팅되면) 그 뒤로는 항상 같은 결과이므로,
+    프로세스 메모리에 결과를 캐싱해 매 호출마다 반복되던 왕복을 없앤다."""
+    global _legacy_migration_checked
+    if _legacy_migration_checked:
+        return
+
     conn.execute(
         f"CREATE TABLE IF NOT EXISTS {MASTER_META_TABLE_NAME} (key TEXT PRIMARY KEY, value TEXT)"
     )
@@ -1986,6 +2008,7 @@ def _migrate_legacy_master_if_needed(conn):
         f"SELECT value FROM {MASTER_META_TABLE_NAME} WHERE key='legacy_migrated'"
     )
     if cur.fetchone() is not None:
+        _legacy_migration_checked = True
         return
 
     legacy_path = _legacy_master_file_path()
@@ -2012,13 +2035,32 @@ def _migrate_legacy_master_if_needed(conn):
         f"INSERT OR REPLACE INTO {MASTER_META_TABLE_NAME} (key, value) VALUES ('legacy_migrated', '1')"
     )
     conn.commit()
+    _legacy_migration_checked = True
+
+
+_wal_mode_confirmed = False  # WAL 모드는 DB 파일에 영구히 기록되는 설정이라 프로세스당 한 번만 확인하면 됨
+
+
+def _set_wal_mode_if_needed(conn):
+    """PRAGMA journal_mode=WAL 을 최초 1회만 실행.
+
+    WAL 모드는 커넥션이 아니라 DB 파일 자체에 저장되는 설정이라, 한 번 켜두면 이후에
+    새 커넥션을 열 때 다시 설정할 필요가 없다 (그냥 열기만 해도 WAL로 동작함). 그런데
+    PRAGMA 실행 자체가 커넥션 열기/닫기보다 훨씬 비싸서(실측: 커넥션당 ~1.3ms 추가),
+    매번 마스터를 읽고 쓸 때마다 이 프라그마를 반복 실행하는 게 원가 페이지 진입 시
+    체감 지연의 상당 부분을 차지하고 있었다."""
+    global _wal_mode_confirmed
+    if _wal_mode_confirmed:
+        return
+    conn.execute("PRAGMA journal_mode=WAL")
+    _wal_mode_confirmed = True
 
 
 def _get_master_db_connection():
     """마스터 SQLite DB 연결 반환 (필요 시 예전 파일에서 자동 마이그레이션 수행)."""
     conn = sqlite3.connect(MASTER_DB_PATH, timeout=30)
     conn.isolation_level = None  # 수동으로 BEGIN IMMEDIATE 트랜잭션을 제어하기 위해 autocommit 모드 사용
-    conn.execute("PRAGMA journal_mode=WAL")
+    _set_wal_mode_if_needed(conn)
     _migrate_legacy_master_if_needed(conn)
     return conn
 
@@ -2137,7 +2179,7 @@ def save_final_master(final_cost_df):
     conn = sqlite3.connect(MASTER_DB_PATH, timeout=30)
     conn.isolation_level = None
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
+        _set_wal_mode_if_needed(conn)
         _migrate_legacy_master_if_needed(conn)
 
         conn.execute("BEGIN IMMEDIATE")

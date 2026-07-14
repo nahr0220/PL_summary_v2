@@ -119,11 +119,22 @@ def _master_table_exists(conn):
     return cur.fetchone() is not None
 
 
+_legacy_migration_checked = False  # 프로세스 안에서 한 번만 확인하면 충분 (아래 함수 설명 참고)
+
+
 def _migrate_legacy_master_if_needed(conn):
     """예전 master_pnl.parquet/xlsx 가 있으면 SQLite로 딱 한 번만 자동 가져온다.
 
     meta 테이블에 'legacy_migrated' 플래그를 남겨, 이후 마스터를 초기화(delete)해도
-    예전 파일이 남아있다고 해서 다시 되살아나지 않게 한다."""
+    예전 파일이 남아있다고 해서 다시 되살아나지 않게 한다.
+
+    이 함수는 SQLite 연결을 열 때마다 매번 호출되는데, 원래는 그때마다 CREATE TABLE
+    IF NOT EXISTS + SELECT 를 다시 실행했다. 한 번 확인되면 그 뒤로는 항상 같은
+    결과이므로, 프로세스 메모리에 캐싱해 매 호출마다 반복되던 왕복을 없앤다."""
+    global _legacy_migration_checked
+    if _legacy_migration_checked:
+        return
+
     conn.execute(
         f"CREATE TABLE IF NOT EXISTS {MASTER_META_TABLE_NAME} (key TEXT PRIMARY KEY, value TEXT)"
     )
@@ -131,6 +142,7 @@ def _migrate_legacy_master_if_needed(conn):
         f"SELECT value FROM {MASTER_META_TABLE_NAME} WHERE key='legacy_migrated'"
     )
     if cur.fetchone() is not None:
+        _legacy_migration_checked = True
         return
 
     legacy_path = _legacy_master_file_path()
@@ -148,13 +160,28 @@ def _migrate_legacy_master_if_needed(conn):
         f"INSERT OR REPLACE INTO {MASTER_META_TABLE_NAME} (key, value) VALUES ('legacy_migrated', '1')"
     )
     conn.commit()
+    _legacy_migration_checked = True
+
+
+_wal_mode_confirmed = False  # WAL 모드는 DB 파일에 영구히 기록되는 설정이라 프로세스당 한 번만 확인하면 됨
+
+
+def _set_wal_mode_if_needed(conn):
+    """PRAGMA journal_mode=WAL 을 최초 1회만 실행 (WAL은 커넥션이 아니라 파일에 저장되는
+    설정이라, 한 번 켜두면 새 커넥션은 다시 설정 안 해도 그대로 WAL로 동작한다.
+    PRAGMA 실행 자체가 커넥션 열기보다 훨씬 비싸서 매번 실행하면 낭비다)."""
+    global _wal_mode_confirmed
+    if _wal_mode_confirmed:
+        return
+    conn.execute("PRAGMA journal_mode=WAL")
+    _wal_mode_confirmed = True
 
 
 def _get_master_db_connection():
     """마스터 SQLite DB 연결 반환 (필요 시 예전 파일에서 자동 마이그레이션 수행)."""
     conn = sqlite3.connect(MASTER_DB_PATH, timeout=30)
     conn.isolation_level = None  # 수동으로 BEGIN IMMEDIATE 트랜잭션을 제어하기 위해 autocommit 모드 사용
-    conn.execute("PRAGMA journal_mode=WAL")
+    _set_wal_mode_if_needed(conn)
     _migrate_legacy_master_if_needed(conn)
     return conn
 
@@ -238,7 +265,7 @@ def save_sales_master(new_df):
     conn = sqlite3.connect(MASTER_DB_PATH, timeout=30)
     conn.isolation_level = None
     try:
-        conn.execute("PRAGMA journal_mode=WAL")
+        _set_wal_mode_if_needed(conn)
         _migrate_legacy_master_if_needed(conn)
 
         conn.execute("BEGIN IMMEDIATE")

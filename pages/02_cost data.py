@@ -1097,6 +1097,152 @@ def _calculate_measurement_hours(
     return _excel_round(total_seconds / 3600.0, 2)
 
 
+def _parse_date_series(series):
+    """_parse_date_value 의 벡터화 버전 (열 전체를 한 번에 파싱, 결과는 완전히 동일해야 함).
+
+    pd.to_datetime 을 값 하나씩(.apply) 부르는 대신 열 전체를 한 번에 넘기면, pandas가
+    포맷을 한 번만 추정해서 재사용하기 때문에 수백 배 빠르다."""
+    text = series.astype(str).str.strip()
+    is_8digit = text.str.match(r"^\d{8}$").fillna(False)
+    result = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    if is_8digit.any():
+        result.loc[is_8digit] = pd.to_datetime(text[is_8digit], format="%Y%m%d", errors="coerce")
+    other = ~is_8digit
+    if other.any():
+        result.loc[other] = pd.to_datetime(series[other], errors="coerce")
+    return result
+
+
+def _parse_time_series(series):
+    """_parse_time_value 의 벡터화 버전 (열 전체를 한 번에 파싱, 결과는 완전히 동일해야 함).
+
+    컬럼 안의 값 종류(datetime.time 객체 / datetime 객체 / 문자열)별로 그룹을 나눠
+    한 번에 처리한다 -- 타입 판별(hasattr)만 값별로 하고, 실제 파싱(비용의 대부분)은
+    그룹 단위로 한 번에 실행."""
+    n = len(series)
+    result = pd.Series([None] * n, index=series.index, dtype=object)
+    if n == 0:
+        return result
+
+    blank_mask = series.isna()
+    try:
+        blank_mask = blank_mask | (series.astype(str).str.strip().eq("") & ~blank_mask)
+    except Exception:
+        pass
+    valid_idx = series.index[~blank_mask]
+    if len(valid_idx) == 0:
+        return result
+    valid_vals = series.loc[valid_idx]
+
+    is_time_obj = valid_vals.map(
+        lambda v: hasattr(v, "hour") and hasattr(v, "minute") and not hasattr(v, "year")
+    )
+    is_datetime_obj = (~is_time_obj) & valid_vals.map(
+        lambda v: hasattr(v, "hour") and hasattr(v, "year")
+    )
+    is_string_like = ~is_time_obj & ~is_datetime_obj
+
+    if is_time_obj.any():
+        idx = valid_idx[is_time_obj.to_numpy()]
+        result.loc[idx] = valid_vals[is_time_obj]
+
+    if is_datetime_obj.any():
+        idx = valid_idx[is_datetime_obj.to_numpy()]
+        result.loc[idx] = valid_vals[is_datetime_obj].apply(lambda v: v.time())
+
+    if is_string_like.any():
+        idx = valid_idx[is_string_like.to_numpy()]
+        str_vals = valid_vals[is_string_like].astype(str).str.strip()
+        empty = str_vals.eq("")
+        parsed = pd.to_datetime(str_vals, errors="coerce")
+        times = parsed.dt.time
+        # to_datetime 실패(NaT)/빈 문자열은 원본 함수처럼 None 유지 (NaT 그대로 두지 않음)
+        times = times.where(~(parsed.isna() | empty.to_numpy()), None)
+        result.loc[idx] = times
+
+    return result
+
+
+def _calculate_measurement_hours_batch(df, holiday_set):
+    """원가동인 통합 df 전체의 측정시간(H)을 벡터화해서 계산 (TS는 0.5 고정).
+
+    측정 건 대부분은 시작일==종료일(당일 측정)이라, 이 경우만 벡터화된 계산으로
+    처리하고, 여러 날에 걸친 구간이나 날짜/시간 파싱이 애매한 행은 원본
+    _calculate_measurement_hours 를 그대로 호출해 결과가 완전히 동일하도록 보장한다
+    (기존 .apply(axis=1) 행 반복이 원가동인 건수가 많을 때 체감 지연의 주요 원인이었음).
+    """
+    n = len(df)
+    result = pd.Series([0.0] * n, index=df.index, dtype=object)
+    if n == 0:
+        return result
+
+    is_ts = df["공정"].astype(str).str.strip().eq("TS")
+    result[is_ts] = 0.5
+
+    remaining_idx = df.index[~is_ts]
+    if len(remaining_idx) == 0:
+        return result
+
+    sub = df.loc[remaining_idx]
+    sd_parsed = _parse_date_series(sub["최초측정일"])
+    ed_parsed = _parse_date_series(sub["최종측정일"])
+    st_parsed = _parse_time_series(sub["최초측정시간"])
+    et_parsed = _parse_time_series(sub["최종측정시간"])
+
+    same_day_mask = (
+        sd_parsed.notna() & ed_parsed.notna()
+        & st_parsed.notna() & et_parsed.notna()
+        & (sd_parsed.dt.normalize() == ed_parsed.dt.normalize())
+    )
+
+    # ----- 빠른 경로: 시작일 == 종료일 (측정 건 대부분이 여기 해당) -----
+    fast_idx = remaining_idx[same_day_mask.to_numpy()]
+    if len(fast_idx) > 0:
+        sd_f = sd_parsed[same_day_mask]
+        st_f = st_parsed[same_day_mask]
+        et_f = et_parsed[same_day_mask]
+
+        st_td = st_f.apply(lambda t: pd.Timedelta(hours=t.hour, minutes=t.minute, seconds=t.second))
+        et_td = et_f.apply(lambda t: pd.Timedelta(hours=t.hour, minutes=t.minute, seconds=t.second))
+
+        day = sd_f.dt.normalize()
+        start_dt = day + st_td
+        end_dt = day + et_td
+        work_start = day + pd.Timedelta(hours=WORK_START_HOUR, minutes=WORK_START_MINUTE)
+        work_end = day + pd.Timedelta(hours=WORK_END_HOUR, minutes=WORK_END_MINUTE)
+
+        end_before_start = end_dt < start_dt
+
+        weekday_ok = day.dt.weekday < 5
+        is_holiday = day.dt.date.map(lambda d: d in holiday_set)
+        is_workday_mask = weekday_ok & ~is_holiday
+
+        segment_start = start_dt.where(start_dt >= work_start, work_start)
+        segment_end = end_dt.where(end_dt <= work_end, work_end)
+        seconds = (segment_end - segment_start).dt.total_seconds().clip(lower=0)
+        hours = seconds / 3600.0
+        hours = hours.where(is_workday_mask, 0.0)
+        hours = hours.where(~end_before_start, 0.0)
+        hours_rounded = hours.apply(lambda v: _excel_round(v, 2))
+
+        result.loc[fast_idx] = hours_rounded.to_numpy()
+
+    # ----- 느린 경로(원본 함수 그대로): 여러 날에 걸치거나 파싱이 애매한 행 -----
+    slow_idx = remaining_idx[~same_day_mask.to_numpy()]
+    if len(slow_idx) > 0:
+        slow_sub = df.loc[slow_idx]
+        result.loc[slow_idx] = slow_sub.apply(
+            lambda row: _calculate_measurement_hours(
+                row["최초측정일"], row["최초측정시간"],
+                row["최종측정일"], row["최종측정시간"],
+                holiday_set,
+            ),
+            axis=1,
+        )
+
+    return result
+
+
 def _build_segment_to_product_id_lookups_local(detail_df):
     """현재 페이지 모듈 내에서 사용하기 위해 preprocess 모듈 함수를 호출.
 
@@ -1276,16 +1422,7 @@ def build_combined_cost_driver_df(
 
     # 측정시간(H) 계산
     holiday_set = _build_korean_holiday_checker(year_hint=settlement_year)
-
-    def _row_hours(row):
-        if str(row["공정"]).strip() == "TS":
-            return 0.5
-        return _calculate_measurement_hours(
-            row["최초측정일"], row["최초측정시간"],
-            row["최종측정일"], row["최종측정시간"],
-            holiday_set,
-        )
-    combined["측정시간(H)"] = combined.apply(_row_hours, axis=1)
+    combined["측정시간(H)"] = _calculate_measurement_hours_batch(combined, holiday_set)
 
     # 발생연도/발생월 = 결산연도/결산월
     combined["발생연도"] = int(settlement_year) if settlement_year is not None else pd.NA

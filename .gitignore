@@ -1,0 +1,21 @@
+# 컴파일 캐시
+__pycache__/
+*.pyc
+
+# 실제 운영 데이터 (SQLite 마스터 DB) -- 코드 배포에 포함하면 안 됨
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+
+# 참조/원본 데이터 파일 (개인정보·거래처 정보 포함, 코드 배포에 불필요)
+master_pnl.xlsx
+master_pnl.parquet
+master_hr.xlsx
+master_vendor.xlsx
+
+# 인증서/키
+certs/
+*.key
+*.crt
+*.pem
